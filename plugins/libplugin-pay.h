@@ -232,6 +232,9 @@ struct payment {
 	struct channel_hint *channel_hints;
 	struct node_id *excluded_nodes;
 
+	/* Optional temporarily excluded channel (i.e. this routehint) */
+	struct short_channel_id *temp_exclusion;
+
 	struct payment_result *result;
 
 	/* Did something happen that will cause all future attempts to fail?
@@ -252,6 +255,13 @@ struct payment {
 
 	/* Human readable explanation of why this payment failed. */
 	const char *failreason;
+
+	/* If a failed getroute call can be retried for this payment. Allows
+	 * us for example to signal to any retry modifier that we can retry
+	 * despite getroute not returning a usable route. This can be the case
+	 * if we switch any of the parameters such as destination or
+	 * amount. */
+	bool failroute_retry;
 };
 
 struct payment_modifier {
@@ -296,9 +306,17 @@ struct routehints_data {
 	/* Current routehint, if any. */
 	struct route_info *current_routehint;
 
+	/* Position of the current routehint in the routehints
+	 * array. Inherited and incremented on child payments and reset on
+	 * split. */
+	int offset;
+
 	/* We modify the CLTV in the getroute call, so we need to remember
 	 * what the final cltv delta was so we re-apply it correctly. */
 	u32 final_cltv;
+
+	/* Is the destination reachable without any routehints? */
+	bool destination_reachable;
 };
 
 struct exemptfee_data {

@@ -437,8 +437,6 @@ remote_routing_failure(const tal_t *ctx,
 			*pay_errcode = PAY_TRY_OTHER_ROUTE;
 		erring_node = &route_nodes[origin_index];
 	} else {
-		u8 *gossip_msg;
-
 		*pay_errcode = PAY_TRY_OTHER_ROUTE;
 
 		/* Report the *next* channel as failing. */
@@ -455,17 +453,13 @@ remote_routing_failure(const tal_t *ctx,
 			erring_node = &route_nodes[origin_index + 1];
 		} else
 			erring_node = &route_nodes[origin_index];
-
-		/* Tell gossipd: it may want to remove channels or even nodes
-		 * in response to this, and there may be a channel_update
-		 * embedded too */
-		gossip_msg = towire_gossip_payment_failure(NULL,
-							   erring_node,
-							   erring_channel,
-							   dir,
-							   failuremsg);
-		subd_send_msg(ld->gossip, take(gossip_msg));
 	}
+
+	/* Tell gossipd; it will try to extract channel_update */
+	/* FIXME: sendonion caller should do this, and inform gossipd of any
+	 * permanent errors. */
+	subd_send_msg(ld->gossip,
+		      take(towire_gossip_payment_failure(NULL, failuremsg)));
 
 	routing_failure->erring_index = (unsigned int) (origin_index + 1);
 	routing_failure->failcode = failcode;
@@ -1183,8 +1177,9 @@ static struct command_result *json_sendonion(struct command *cmd,
 	struct route_hop *first_hop;
 	struct sha256 *payment_hash;
 	struct lightningd *ld = cmd->ld;
-	const char *label;
+	const char *label, *b11str;
 	struct secret *path_secrets;
+	struct amount_msat *msat;
 	u64 *partid;
 
 	if (!param(cmd, buffer, params,
@@ -1194,6 +1189,8 @@ static struct command_result *json_sendonion(struct command *cmd,
 		   p_opt("label", param_escaped_string, &label),
 		   p_opt("shared_secrets", param_secrets_array, &path_secrets),
 		   p_opt_def("partid", param_u64, &partid, 0),
+		   p_opt("bolt11", param_string, &b11str),
+		   p_opt_def("msatoshi", param_msat, &msat, AMOUNT_MSAT(0)),
 		   NULL))
 		return command_param_failed();
 
@@ -1206,8 +1203,8 @@ static struct command_result *json_sendonion(struct command *cmd,
 				    failcode);
 
 	return send_payment_core(ld, cmd, payment_hash, *partid,
-				 first_hop, AMOUNT_MSAT(0), AMOUNT_MSAT(0),
-				 label, NULL, &packet, NULL, NULL, NULL,
+				 first_hop, *msat, AMOUNT_MSAT(0),
+				 label, b11str, &packet, NULL, NULL, NULL,
 				 path_secrets);
 }
 

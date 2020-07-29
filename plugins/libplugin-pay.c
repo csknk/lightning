@@ -26,6 +26,9 @@ struct payment *payment_new(tal_t *ctx, struct command *cmd,
 	p->getroute->riskfactorppm = 10000000;
 	p->abort = false;
 	p->route = NULL;
+	p->temp_exclusion = NULL;
+	p->failroute_retry = false;
+	p->bolt11 = NULL;
 
 	/* Copy over the relevant pieces of information. */
 	if (parent != NULL) {
@@ -481,6 +484,16 @@ static void payment_getroute_add_excludes(struct payment *p,
 	nodes = payment_get_excluded_nodes(tmpctx, p);
 	for (size_t i=0; i<tal_count(nodes); i++)
 		json_add_node_id(js, NULL, &nodes[i]);
+
+	/* And make sure we don't route in a circle via the routehint! */
+	if (p->temp_exclusion) {
+		struct short_channel_id_dir scidd;
+		scidd.scid = *p->temp_exclusion;
+		for (size_t dir = 0; dir < 2; dir++) {
+			scidd.dir = dir;
+			json_add_short_channel_id_dir(js, NULL, &scidd);
+		}
+	}
 
 	json_array_end(js);
 }
@@ -1016,6 +1029,7 @@ static struct command_result *payment_createonion_success(struct command *cmd,
 	json_object_end(req->js);
 
 	json_add_sha256(req->js, "payment_hash", p->payment_hash);
+	json_add_amount_msat_only(req->js, "msatoshi", p->amount);
 
 	json_array_start(req->js, "shared_secrets");
 	secrets = p->createonion_response->shared_secrets;
@@ -1027,6 +1041,9 @@ static struct command_result *payment_createonion_success(struct command *cmd,
 
 	if (p->label)
 		json_add_string(req->js, "label", p->label);
+
+	if (p->bolt11)
+		json_add_string(req->js, "bolt11", p->bolt11);
 
 	send_outreq(p->plugin, req);
 	return command_still_pending(cmd);
@@ -1344,7 +1361,6 @@ static void payment_finished(struct payment *p)
 			json_add_hex_talarr(ret, "raw_message",
 					    result.failure->raw_message);
 			json_add_num(ret, "created_at", p->start_time.ts.tv_sec);
-			json_add_string(ret, "message", result.failure->message);
 			json_add_node_id(ret, "destination", p->destination);
 			json_add_sha256(ret, "payment_hash", p->payment_hash);
 
@@ -1516,7 +1532,7 @@ static bool payment_can_retry(struct payment *p)
 	bool is_final;
 
 	if (p->result == NULL)
-		return false;
+		return p->failroute_retry;
 
 	idx = res->erring_index != NULL ? *res->erring_index : 0;
 	is_final = (idx == tal_count(p->route));
@@ -1584,7 +1600,7 @@ static inline void retry_step_cb(struct retry_mod_data *rd,
 
 	/* If we failed to find a route, it's unlikely we can suddenly find a
 	 * new one without any other changes, so it's time to give up. */
-	if (p->route == NULL)
+	if (p->route == NULL && !p->failroute_retry)
 		return payment_continue(p);
 
 	/* If the root is marked as abort, we do not retry anymore */
@@ -1596,9 +1612,9 @@ static inline void retry_step_cb(struct retry_mod_data *rd,
 
 	/* If the failure was not final, and we tried a route, try again. */
 	if (rdata->retries > 0) {
+		payment_set_step(p, PAYMENT_STEP_RETRY);
 		subpayment = payment_new(p, NULL, p, p->modifiers);
 		payment_start(subpayment);
-		payment_set_step(p, PAYMENT_STEP_RETRY);
 		subpayment->why =
 		    tal_fmt(subpayment, "Still have %d attempts left",
 			    rdata->retries - 1);
@@ -1756,7 +1772,7 @@ static bool routehint_excluded(struct payment *p,
 	 * are suggesting we use it the other way.  Very unlikely though! */
 	for (size_t i = 0; i < tal_count(routehint); i++) {
 		const struct route_info *r = &routehint[i];
-		for (size_t j=0; tal_count(nodes); j++)
+		for (size_t j = 0; j < tal_count(nodes); j++)
 			if (node_id_eq(&r->pubkey, &nodes[j]))
 			    return true;
 
@@ -1770,19 +1786,22 @@ static bool routehint_excluded(struct payment *p,
 static struct route_info *next_routehint(struct routehints_data *d,
 					     struct payment *p)
 {
-	/* Implements a random selection of a routehint, or none in 1/numhints
-	 * cases, by starting the iteration of the routehints in a random
-	 * order, and adding a virtual NULL result at the end. */
 	size_t numhints = tal_count(d->routehints);
-	size_t offset = pseudorand(numhints + 1);
+	struct route_info *curr;
 
-	for (size_t i=0; i<tal_count(d->routehints); i++) {
-		size_t curr = (offset + i) % (numhints + 1);
-		if (curr == numhints)
-			return NULL;
+	if (d->routehints == NULL || numhints == 0)
+		return NULL;
 
-		if (!routehint_excluded(p, d->routehints[curr]))
-			return d->routehints[i];
+	/* BOLT #11:
+	 *
+	 *   - if a writer offers more than one of any field type, it:
+	 *     - MUST specify the most-preferred field first, followed
+	 *       by less-preferred fields, in order.
+	 */
+	for (; d->offset <numhints; d->offset++) {
+		curr = d->routehints[d->offset];
+		if (curr == NULL || !routehint_excluded(p, curr))
+			return curr;
 	}
 	return NULL;
 }
@@ -1821,9 +1840,99 @@ static u32 route_cltv(u32 cltv,
 	return cltv;
 }
 
+/* Change the destination and compute the final msatoshi amount to send to the
+ * routehint entry point. */
+static void routehint_pre_getroute(struct routehints_data *d, struct payment *p)
+{
+	bool have_more;
+	d->current_routehint = next_routehint(d, p);
+
+	/* Signal that we could retry with another routehint even if getroute
+	 * fails. */
+	have_more = (d->offset < tal_count(d->routehints) - 1);
+	p->failroute_retry = have_more;
+
+	if (d->current_routehint != NULL) {
+		if (!route_msatoshi(&p->getroute->amount, p->amount,
+				    d->current_routehint,
+				    tal_count(d->current_routehint))) {
+		}
+		d->final_cltv = p->getroute->cltv;
+		p->getroute->destination = &d->current_routehint[0].pubkey;
+		p->getroute->cltv =
+		    route_cltv(p->getroute->cltv, d->current_routehint,
+			       tal_count(d->current_routehint));
+		plugin_log(
+		    p->plugin, LOG_DBG, "Using routehint %s (%s) cltv_delta=%d",
+		    type_to_string(tmpctx, struct node_id,
+				   &d->current_routehint->pubkey),
+		    type_to_string(tmpctx, struct short_channel_id,
+				   &d->current_routehint->short_channel_id),
+		    d->current_routehint->cltv_expiry_delta);
+
+		/* Exclude the entrypoint to the routehint, so we don't end up
+		 * going through the destination to the entrypoint. */
+		p->temp_exclusion = &d->current_routehint[0].short_channel_id;
+	} else {
+		plugin_log(p->plugin, LOG_DBG, "Not using a routehint");
+		p->temp_exclusion = NULL;
+	}
+}
+
+static struct command_result *routehint_getroute_result(struct command *cmd,
+							const char *buffer,
+							const jsmntok_t *toks,
+							struct payment *p)
+{
+	struct payment *root = payment_root(p);
+	const jsmntok_t *rtok = json_get_member(buffer, toks, "route");
+	struct routehints_data *d = payment_mod_routehints_get_data(root);
+
+	/* If there was a route the destination is reachable without
+	 * routehints. */
+	d->destination_reachable = (rtok != NULL);
+
+	if (d->destination_reachable)
+		tal_arr_expand(&d->routehints, NULL);
+
+	routehint_pre_getroute(d, p);
+
+	plugin_log(p->plugin, LOG_DBG,
+		   "The destination is%s directly reachable %s attempts "
+		   "without routehints",
+		   d->destination_reachable ? "" : " not",
+		   d->destination_reachable ? "including" : "excluding");
+
+	/* Now we can continue on our merry way. */
+	payment_continue(p);
+
+	/* Let payment_finished_ handle this, so we mark it as pending */
+	return command_still_pending(cmd);
+}
+
+static void routehint_check_reachable(struct payment *p)
+{
+	struct out_req *req;
+	/* Start a tiny exploratory getroute request, so we
+	 * know whether we stand any chance of reaching the
+	 * destination without routehints. This will later be
+	 * used to mix in attempts without routehints. */
+	req = jsonrpc_request_start(p->plugin, NULL, "getroute",
+				    routehint_getroute_result,
+				    routehint_getroute_result, p);
+	json_add_node_id(req->js, "id", p->destination);
+	json_add_amount_msat_only(req->js, "msatoshi", AMOUNT_MSAT(1000));
+	json_add_num(req->js, "maxhops", 20);
+	json_add_num(req->js, "riskfactor", 10);
+	send_outreq(p->plugin, req);
+	plugin_log(p->plugin, LOG_DBG,
+		   "Asking gossipd whether %s is reachable "
+		   "without routehints.",
+		   type_to_string(tmpctx, struct node_id, p->destination));
+}
+
 static void routehint_step_cb(struct routehints_data *d, struct payment *p)
 {
-	struct routehints_data *pd;
 	struct route_hop hop;
 	const struct payment *root = payment_root(p);
 
@@ -1837,35 +1946,18 @@ static void routehint_step_cb(struct routehints_data *d, struct payment *p)
 		if (p->parent == NULL) {
 			d->routehints = filter_routehints(d, p->local_id,
 							  p->invoice->routes);
-		} else {
-			pd = payment_mod_get_data(p->parent,
-						  &routehints_pay_mod);
-			/* Since we don't modify the list of routehints after
-			 * the root has filtered them we can just shared a
-			 * pointer here. */
-			d->routehints = pd->routehints;
-		}
-		d->current_routehint = next_routehint(d, p);
 
-		if (d->current_routehint != NULL) {
-			/* Change the destination and compute the final msatoshi
-			 * amount to send to the routehint entry point. */
-			if (!route_msatoshi(&p->getroute->amount, p->amount,
-				    d->current_routehint,
-				    tal_count(d->current_routehint))) {
-			}
-			d->final_cltv = p->getroute->cltv;
-			p->getroute->destination = &d->current_routehint[0].pubkey;
-			p->getroute->cltv =
-			    route_cltv(p->getroute->cltv, d->current_routehint,
-				       tal_count(d->current_routehint));
-			plugin_log(p->plugin, LOG_DBG, "Using routehint %s (%s) cltv_delta=%d",
-				   type_to_string(tmpctx, struct node_id, &d->current_routehint->pubkey),
-				   type_to_string(tmpctx, struct short_channel_id, &d->current_routehint->short_channel_id),
-				   d->current_routehint->cltv_expiry_delta
-				);
+			plugin_log(p->plugin, LOG_DBG,
+				   "After filtering routehints we're left with "
+				   "%zu usable hints",
+				   tal_count(d->routehints));
+			    /* Do not continue normally, instead go and check if
+			     * we can reach the destination directly. */
+			    return routehint_check_reachable(p);
 		}
-	} else if (p->step == PAYMENT_STEP_GOT_ROUTE) {
+
+		routehint_pre_getroute(d, p);
+	} else if (p->step == PAYMENT_STEP_GOT_ROUTE && d->current_routehint != NULL) {
 		/* Now it's time to stitch the two partial routes together. */
 		struct amount_msat dest_amount;
 		struct route_info *routehint = d->current_routehint;
@@ -1903,9 +1995,27 @@ static void routehint_step_cb(struct routehints_data *d, struct payment *p)
 
 static struct routehints_data *routehint_data_init(struct payment *p)
 {
-	/* We defer the actual initialization to the step callback when
-	 * we have the invoice attached. */
-	return talz(p, struct routehints_data);
+	struct routehints_data *pd, *d = tal(p, struct routehints_data);
+	/* If for some reason we skipped the getroute call (directpay) we'll
+	 * need this to be initialized. */
+	d->current_routehint = NULL;
+	if (p->parent != NULL) {
+		pd = payment_mod_routehints_get_data(payment_root(p));
+		d->destination_reachable = pd->destination_reachable;
+		d->routehints = pd->routehints;
+		if (p->parent->step == PAYMENT_STEP_RETRY)
+			d->offset = pd->offset + 1;
+		else
+			d->offset = 0;
+		return d;
+	} else {
+		/* We defer the actual initialization of the routehints array to
+		 * the step callback when we have the invoice attached. */
+		d->routehints = NULL;
+		d->offset = 0;
+		return d;
+	}
+	return d;
 }
 
 REGISTER_PAYMENT_MODIFIER(routehints, struct routehints_data *,
@@ -2502,6 +2612,7 @@ static void presplit_cb(struct presplit_mod_data *d, struct payment *p)
 		if (amount_msat_greater(target, p->amount))
 			return payment_continue(p);
 
+		payment_set_step(p, PAYMENT_STEP_SPLIT);
 		/* Ok, we know we should split, so split here and then skip this
 		 * payment and start the children instead. */
 		while (!amount_msat_eq(amt, AMOUNT_MSAT(0))) {
@@ -2538,7 +2649,6 @@ static void presplit_cb(struct presplit_mod_data *d, struct payment *p)
 		    count,
 		    type_to_string(tmpctx, struct amount_msat, &root->amount),
 		    type_to_string(tmpctx, struct amount_msat, &target));
-		payment_set_step(p, PAYMENT_STEP_SPLIT);
 		plugin_log(p->plugin, LOG_INFORM, "%s", p->why);
 	}
 	payment_continue(p);
@@ -2636,6 +2746,7 @@ static void adaptive_splitter_cb(struct adaptive_split_mod_data *d, struct payme
 				    "allowed by our channels");
 			}
 
+			p->step = PAYMENT_STEP_SPLIT;
 			a = payment_new(p, NULL, p, p->modifiers);
 			b = payment_new(p, NULL, p, p->modifiers);
 
@@ -2660,7 +2771,6 @@ static void adaptive_splitter_cb(struct adaptive_split_mod_data *d, struct payme
 
 			payment_start(a);
 			payment_start(b);
-			p->step = PAYMENT_STEP_SPLIT;
 
 			/* Take note that we now have an additional split that
 			 * may end up using an HTLC. */
