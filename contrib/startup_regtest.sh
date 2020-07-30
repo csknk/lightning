@@ -31,8 +31,11 @@
 ##  $ cleanup_ln # stops and cleans up aliases
 ##
 
-set -o nounset
-set -o errexit
+#set -o nounset
+#set -o errexit # same as set -e
+trap 'last_command=$BASH_COMMAND' ERR DEBUG
+#trap 'echo "\"${last_command}\" command filed with exit code $?."' EXIT
+trap 'echo "\"$BASH_COMMAND\" command filed with exit code $?."' EXIT
 
 exit_early() {
 	echo "ERROR" >&2
@@ -42,10 +45,8 @@ exit_early() {
 
 set_variables() {
 	PATH_TO_LIGHTNING=""
-	n_nodes=4
-	local parent_dir=""
-	local grandparent_dir=""
-	local data_dir=""
+	PARENT_DIR=""
+	GRANDPARENT_DIR=""
 
 	# Do the Right Thing if we're currently in top of srcdir.
 	if [ -z "${PATH_TO_LIGHTNING}" ] && [ -x cli/lightning-cli ] && [ -x lightningd/lightningd ]; then
@@ -54,13 +55,9 @@ set_variables() {
 
 	if [ -z "${PATH_TO_LIGHTNING}" ]; then
 		# Already installed maybe?  Prints
-		local no_path_set_no_executable="
-		A lightning-cli executable is needed, and has not been found. If
-		you have an (uninstalled) executable, please set $PATH_TO_LIGHTNING in your shell.
-		"
-		type lightning-cli || exit_early "${no_path_set_no_executable}"
+		type lightning-cli || exit_early "lightning-cli not found."
 		# shellcheck disable=SC2039
-		type lightningd || return
+		type lightningd || exit_early "lightningd not found."
 		LCLI=lightning-cli
 		LIGHTNINGD=lightningd
 	else
@@ -83,39 +80,38 @@ set_variables() {
 	cat <<-EOF
 	You can specify a parent directory for regtest data directories if required.
 	This can be handy if your experiments are likely to span a system reboot.
-
 	If this is not important, select 'N' and the data directories will be placed in \`/tmp\`.
 EOF
-	read -pr "Do you want to choose a parent directory for regtest data directories? [Yn]" TMP_SESSION_REQ
+
+	read -rp "Do you want to choose a parent directory for regtest data directories? [Yn]" TMP_SESSION_REQ
 	if [[ ${TMP_SESSION_REQ} =~ [nN](o)* ]]; then
-		parent_dir=/tmp
+		PARENT_DIR=/tmp
 	else
-	while [[ ! -d ${parent_dir} ]]
-	do
-		read -pr "Please enter a path for the data directory for lightning development instances:" parent_dir
-		parent_dir="${parent_dir//\~/$HOME}"
-		grandparent_dir=$(dirname "${parent_dir}")
-		[[ ! -d ${grandparent_dir} ]] && { echo "Invalid path...please try again."; continue; } 
-		[[ ! -w ${grandparent_dir} ]] && { echo "${grandparent_dir} is not writeable...please try again."; continue; } 
+		while true; do
+			read -rp  "Please enter a path for the data directory for lightning development instances:" PARENT_DIR
+			PARENT_DIR="${PARENT_DIR//\~/$HOME}"
+			GRANDPARENT_DIR=$(dirname "${PARENT_DIR}")
+			[[ ! -d ${GRANDPARENT_DIR} ]] && { echo "Invalid path...try again."; continue; } 
+			[[ ! -w ${GRANDPARENT_DIR} ]] && { echo "${GRANDPARENT_DIR} not writeable...try again."; continue; } 
+			break	
+		done
+	fi
+	# Make the data directories if they do not already exist.
+	for i in $(seq "$N_NODES"); do
+		mkdir -p "${PARENT_DIR}/l${i}-regtest"
+#		data_dir=${PARENT_DIR}/l${i}-regtest
+#		[[ ! -d ${data_dir} ]] && mkdir -p "${data_dir}"
 	done
-fi
-# Make the data directories
-# If there is already a data directory at the specified $parent_dir, use this.
-# Otherwise, create a new data directory for each node.
-for i in $(seq $n_nodes); do
-	data_dir=${parent_dir}/l${i}-regtest
-	[[ ! -d ${data_dir} ]] && mkdir -p "${data_dir}"
-done
 }
 
 write_config() {
-	for i in $(seq $n_nodes); do
+	for i in $(seq "$N_NODES"); do
 		port=$((9000 + i))
 		# Node one config
-		cat <<- EOF > "${parent_dir}/l${i}-regtest/config"
+		cat <<- EOF > "${PARENT_DIR}/l${i}-regtest/config"
 		network=regtest
 		log-level=debug
-		log-file=${parent_dir}/l${i}-regtest/log
+		log-file=${PARENT_DIR}/l${i}-regtest/log
 		addr=localhost:${port}
 EOF
 	done
@@ -123,21 +119,26 @@ EOF
 }
 
 set_aliases() {
+	echo "Setting aliases..."
 	alias bt-cli='bitcoin-cli -regtest'
-	for i in $(seq $n_nodes); do
+	for i in $(seq "$N_NODES"); do
 		# shellcheck disable=SC2139,SC2086
-		alias l${i}-cli='$LCLI --lightning-dir=${parent_dir}/l${i}-regtest'
+		alias l${i}-cli="${LCLI} --lightning-dir=${PARENT_DIR}/l${i}-regtest"
 		# shellcheck disable=SC2139,SC2086
-		alias l${i}-log='less ${parent_dir}/l${i}-regtest/log'
+		alias l${i}-log="less ${PARENT_DIR}/l${i}-regtest/log"
 	done
 }
 
 start_ln() {
+	echo "Starting lightning regtest nodes..."
 	# Start bitcoind in the background
 	[[ -f "$PATH_TO_BITCOIN/regtest/bitcoind.pid" ]] || bitcoind -daemon -regtest -txindex
 
 	# Wait for it to start.
-	while ! bt-cli ping 2> /dev/null; do sleep 1; done
+	while ! bt-cli ping 2> /dev/null; do
+		echo "Waiting for bitcoind to start..."
+		sleep 1
+	done
 
 	# Kick it out of initialblockdownload if necessary
 	if bt-cli getblockchaininfo | grep -q 'initialblockdownload.*true'; then
@@ -145,9 +146,10 @@ start_ln() {
 	fi
 
 	# Start the lightning nodes
-	for i in $(seq $n_nodes); do
-		if [[ -f "${parent_dir}"/l"${i}"-regtest/lightningd-regtest.pid ]]; then
-		       	"$LIGHTNINGD" --lightning-dir="${parent_dir}"/l"${i}"-regtest &
+	for i in $(seq "$N_NODES"); do
+		echo "Node ${i}..."
+		if [[ -f "${PARENT_DIR}"/l"${i}"-regtest/lightningd-regtest.pid ]]; then
+		       	"$LIGHTNINGD" --lightning-dir="${PARENT_DIR}"/l"${i}" -regtest &
 			echo "Commands: l${i}=cli, l${i}-log"
 		fi
 	done
@@ -157,11 +159,12 @@ start_ln() {
 }
 
 stop_ln() {
+	echo "Stopping any running lightning nodes..."
 	local pid_file
 	local pid
-	for i in $(seq $n_nodes); do
+	for i in $(seq "$N_NODES"); do
 		# If there is a pid for this node, kill the node process & remove .pid file
-		pid_file="${parent_dir}/l${i}-regtest/lightningd-regtest.pid"
+		pid_file="${PARENT_DIR}/l${i}-regtest/lightningd-regtest.pid"
 		if [[ -f "${pid_file}" ]]; then
 			pid=$(cat "${pid_file}")
 			kill "$pid"
@@ -173,8 +176,9 @@ stop_ln() {
 }
 
 cleanup_ln() {
+	echo "Cleaning up lightning regtest..."
 	stop_ln
-	for i in $(seq $n_nodes); do
+	for i in $(seq "$N_NODES"); do
 		# shellcheck disable=2086
 		unalias l${i}-cli
 		# shellcheck disable=2086
@@ -189,6 +193,7 @@ cleanup_ln() {
 	unset -f cleanup_ln
 }
 
+N_NODES=${1:-2}
 set_variables
 write_config
 set_aliases
