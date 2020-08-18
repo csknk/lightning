@@ -55,6 +55,7 @@ COMMON_SRC_NOGEN :=				\
 	common/peer_failed.c			\
 	common/permute_tx.c			\
 	common/ping.c				\
+	common/psbt_open.c			\
 	common/pseudorand.c			\
 	common/read_peer_msg.c			\
 	common/setup.c				\
@@ -95,6 +96,9 @@ COMMON_OBJS := $(COMMON_SRC:.c=.o)
 
 # Common objects depends on bitcoin/ external/ and ccan
 $(COMMON_OBJS): $(CCAN_HEADERS) $(BITCOIN_HEADERS) $(EXTERNAL_HEADERS) $(COMMON_HEADERS_GEN)
+
+# Only common/version.c can include this header.
+common/version.o: gen_version.h
 
 ALL_GEN_HEADERS += $(COMMON_HEADERS_GEN)
 ALL_OBJS += $(COMMON_OBJS)

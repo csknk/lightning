@@ -5,6 +5,7 @@
 #include <ccan/htable/htable_type.h>
 #include <ccan/intmap/intmap.h>
 #include <ccan/json_out/json_out.h>
+#include <ccan/str/hex/hex.h>
 #include <ccan/tal/str/str.h>
 #include <common/amount.h>
 #include <common/bolt11.h>
@@ -80,6 +81,8 @@ struct pay_status {
 
 	/* Array of payment attempts. */
 	struct pay_attempt *attempts;
+
+	struct sha256 payment_hash;
 };
 
 struct pay_command {
@@ -1266,6 +1269,8 @@ static struct pay_status *add_pay_status(struct pay_command *pc,
 	ps->shadow = NULL;
 	ps->exclusions = NULL;
 	ps->attempts = tal_arr(ps, struct pay_attempt, 0);
+	hex_decode(pc->payment_hash, strlen(pc->payment_hash),
+		   &ps->payment_hash, sizeof(ps->payment_hash));
 
 	list_add_tail(&pay_status, &ps->list);
 	return ps;
@@ -1618,7 +1623,7 @@ static struct command_result *json_paystatus(struct command *cmd,
 	return command_finished(cmd, ret);
 }
 
-static bool attempt_ongoing(const char *b11)
+static bool attempt_ongoing(const struct sha256 *payment_hash)
 {
 	struct pay_status *ps;
 	struct payment *root;
@@ -1628,14 +1633,14 @@ static bool attempt_ongoing(const char *b11)
 	    final_states = PAYMENT_STEP_FAILED | PAYMENT_STEP_SUCCESS;
 
 	list_for_each(&pay_status, ps, list) {
-		if (!streq(b11, ps->bolt11))
+		if (!sha256_eq(payment_hash, &ps->payment_hash))
 			continue;
 		attempt = &ps->attempts[tal_count(ps->attempts)-1];
 		return attempt->result == NULL && attempt->failure == NULL;
 	}
 
 	list_for_each(&payments, root, list) {
-		if (root->bolt11 == NULL || !streq(b11, root->bolt11))
+		if (!sha256_eq(payment_hash, root->payment_hash))
 			continue;
 		res = payment_collect_result(root);
 		diff = res.leafstates & ~final_states;
@@ -1666,6 +1671,12 @@ struct pay_mpp {
 	 * only). Null if we have any part for which we didn't know the
 	 * amount. */
 	struct amount_msat *amount;
+
+	/* Timestamp of the first part */
+	u32 timestamp;
+
+	/* The destination of the payment, if specified. */
+	struct node_id *destination;
 };
 
 static const struct sha256 *pay_mpp_key(const struct pay_mpp *pm)
@@ -1733,8 +1744,16 @@ static void add_new_entry(struct json_stream *ret,
 			  const struct pay_mpp *pm)
 {
 	json_object_start(ret, NULL);
-	json_add_string(ret, "bolt11", pm->b11);
+	if (pm->b11)
+		json_add_string(ret, "bolt11", pm->b11);
+
+	if (pm->destination)
+		json_add_node_id(ret, "destination", pm->destination);
+
+	json_add_sha256(ret, "payment_hash", pm->payment_hash);
 	json_add_string(ret, "status", pm->status);
+	json_add_u32(ret, "created_at", pm->timestamp);
+
 	if (pm->label)
 		json_add_tok(ret, "label", pm->label, buf);
 	if (pm->preimage)
@@ -1777,29 +1796,40 @@ static struct command_result *listsendpays_done(struct command *cmd,
 	ret = jsonrpc_stream_success(cmd);
 	json_array_start(ret, "pays");
 	json_for_each_arr(i, t, arr) {
-		const jsmntok_t *status, *b11tok, *hashtok;
+		const jsmntok_t *status, *b11tok, *hashtok, *destinationtok, *createdtok;
 		const char *b11 = b11str;
 		struct sha256 payment_hash;
+		struct node_id destination;
+		u32 created_at;
 
 		b11tok = json_get_member(buf, t, "bolt11");
 		hashtok = json_get_member(buf, t, "payment_hash");
+		destinationtok = json_get_member(buf, t, "destination");
+		createdtok = json_get_member(buf, t, "created_at");
 		assert(hashtok != NULL);
+		assert(createdtok != NULL);
 
 		json_to_sha256(buf, hashtok, &payment_hash);
+		json_to_u32(buf, createdtok, &created_at);
 		if (b11tok)
 			b11 = json_strdup(cmd, buf, b11tok);
+
+		if (destinationtok)
+			json_to_node_id(buf, destinationtok, &destination);
 
 		pm = pay_map_get(&pay_map, &payment_hash);
 		if (!pm) {
 			pm = tal(cmd, struct pay_mpp);
 			pm->payment_hash = tal_dup(pm, struct sha256, &payment_hash);
 			pm->b11 = tal_steal(pm, b11);
+			pm->destination = tal_dup(pm,struct node_id, &destination);
 			pm->label = json_get_member(buf, t, "label");
 			pm->preimage = NULL;
 			pm->amount_sent = AMOUNT_MSAT(0);
 			pm->amount = talz(pm, struct amount_msat);
 			pm->num_nonfailed_parts = 0;
 			pm->status = NULL;
+			pm->timestamp = created_at;
 			pay_map_add(&pay_map, pm);
 		}
 
@@ -1817,7 +1847,7 @@ static struct command_result *listsendpays_done(struct command *cmd,
 			if (!pm->status || !streq(pm->status, "complete"))
 				pm->status = "pending";
 		} else {
-			if (attempt_ongoing(pm->b11)) {
+			if (attempt_ongoing(pm->payment_hash)) {
 				/* Failed -> pending; don't downgrade success. */
 				if (!pm->status
 				    || !streq(pm->status, "complete"))
@@ -1844,11 +1874,13 @@ static struct command_result *json_listpays(struct command *cmd,
 					    const jsmntok_t *params)
 {
 	const char *b11str;
+	struct sha256 *payment_hash;
 	struct out_req *req;
 
 	/* FIXME: would be nice to parse as a bolt11 so check worked in future */
 	if (!param(cmd, buf, params,
 		   p_opt("bolt11", param_string, &b11str),
+		   p_opt("payment_hash", param_sha256, &payment_hash),
 		   NULL))
 		return command_param_failed();
 
@@ -1857,6 +1889,10 @@ static struct command_result *json_listpays(struct command *cmd,
 				    cast_const(char *, b11str));
 	if (b11str)
 		json_add_string(req->js, "bolt11", b11str);
+
+	if (payment_hash)
+		json_add_sha256(req->js, "payment_hash", payment_hash);
+
 	return send_outreq(cmd->plugin, req);
 }
 
@@ -1881,9 +1917,25 @@ struct payment_modifier *paymod_mods[] = {
 	&local_channel_hints_pay_mod,
 	&exemptfee_pay_mod,
 	&directpay_pay_mod,
-	&presplit_pay_mod,
 	&shadowroute_pay_mod,
+	/* NOTE: The order in which these two paymods are executed is
+	 * significant!
+	 * routehints *must* execute first before presplit.
+	 *
+	 * FIXME: Giving an ordered list of paymods to the paymod
+	 * system is the wrong interface, given that the order in
+	 * which paymods execute is significant.
+	 * (This is typical of Entity-Component-System pattern.)
+	 * What should be done is that libplugin-pay should have a
+	 * canonical list of paymods in the order they execute
+	 * correctly, and whether they are default-enabled/default-disabled,
+	 * and then clients like `pay` and `keysend` will disable/enable
+	 * paymods that do not help them, instead of the current interface
+	 * where clients provide an *ordered* list of paymods they want to
+	 * use.
+	 */
 	&routehints_pay_mod,
+	&presplit_pay_mod,
 	&waitblockheight_pay_mod,
 	&retry_pay_mod,
 	&adaptive_splitter_pay_mod,
@@ -2028,7 +2080,7 @@ static const struct plugin_command commands[] = {
 	}, {
 		"listpays",
 		"payment",
-		"List result of payment {bolt11}, or all",
+		"List result of payment {bolt11} or {payment_hash}, or all",
 		"Covers old payments (failed and succeeded) and current ones.",
 		json_listpays
 	},

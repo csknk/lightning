@@ -5,8 +5,8 @@ from flaky import flaky  # noqa: F401
 from pyln.client import RpcError, Millisatoshi
 from pyln.proto.onion import TlvPayload
 from utils import (
-    DEVELOPER, wait_for, only_one, sync_blockheight, SLOW_MACHINE, TIMEOUT,
-    VALGRIND, EXPERIMENTAL_FEATURES
+    DEVELOPER, wait_for, only_one, sync_blockheight, TIMEOUT,
+    EXPERIMENTAL_FEATURES, env
 )
 import copy
 import os
@@ -142,9 +142,12 @@ def test_pay_exclude_node(node_factory, bitcoind):
     opts = [
         {'disable-mpp': None},
         {'plugin': os.path.join(os.getcwd(), 'tests/plugins/fail_htlcs.py')},
+        {},
+        {'fee-base': 100, 'fee-per-satoshi': 1000},
         {}
     ]
-    l1, l2, l3 = node_factory.line_graph(3, opts=opts, wait_for_announce=True)
+    l1, l2, l3, l4, l5 = node_factory.get_nodes(5, opts=opts)
+    node_factory.join_nodes([l1, l2, l3], wait_for_announce=True)
     amount = 10**8
 
     inv = l3.rpc.invoice(amount, "test1", 'description')['bolt11']
@@ -169,8 +172,6 @@ def test_pay_exclude_node(node_factory, bitcoind):
     # l1->l4->l5->l3 is the longer route. This makes sure this route won't be
     # tried for the first pay attempt. Just to be sure we also raise the fees
     # that l4 leverages.
-    l4 = node_factory.get_node(options={'fee-base': 100, 'fee-per-satoshi': 1000})
-    l5 = node_factory.get_node()
     l1.rpc.connect(l4.info['id'], 'localhost', l4.port)
     l4.rpc.connect(l5.info['id'], 'localhost', l5.port)
     l5.rpc.connect(l3.info['id'], 'localhost', l3.port)
@@ -626,10 +627,29 @@ def test_sendpay_cant_afford(node_factory):
     with pytest.raises(RpcError):
         l1.pay(l2, 10**9 + 1)
 
-    # This is the fee, which needs to be taken into account for l1.
-    available = 10**9 - 32040000
     # Reserve is 1%.
     reserve = 10**7
+
+    # # This is how we recalc constants (v. v. slow!)
+    # minimum = 1
+    # maximum = 10**9
+    # while maximum - minimum > 1:
+    #     l1, l2 = node_factory.line_graph(2, fundamount=10**6,
+    #                                      opts={'feerates': (15000, 15000, 15000, 15000)})
+    #     try:
+    #         l1.pay(l2, (minimum + maximum) // 2)
+    #         minimum = (minimum + maximum) // 2
+    #     except RpcError:
+    #         maximum = (minimum + maximum) // 2
+    #     print("{} - {}".format(minimum, maximum))
+    # assert False
+
+    # This is the fee, which needs to be taken into account for l1.
+    if EXPERIMENTAL_FEATURES:
+        # option_anchor_outputs
+        available = 10**9 - 44700000
+    else:
+        available = 10**9 - 32040000
 
     # Can't pay past reserve.
     with pytest.raises(RpcError):
@@ -1072,9 +1092,9 @@ def test_forward_different_fees_and_cltv(node_factory, bitcoind):
     # 1. D: 400 base + 4000 millionths
 
     # We don't do D yet.
-    l1 = node_factory.get_node(options={'cltv-delta': 10, 'fee-base': 100, 'fee-per-satoshi': 1000})
-    l2 = node_factory.get_node(options={'cltv-delta': 20, 'fee-base': 200, 'fee-per-satoshi': 2000})
-    l3 = node_factory.get_node(options={'cltv-delta': 30, 'cltv-final': 9, 'fee-base': 300, 'fee-per-satoshi': 3000})
+    l1, l2, l3 = node_factory.get_nodes(3, opts=[{'cltv-delta': 10, 'fee-base': 100, 'fee-per-satoshi': 1000},
+                                                 {'cltv-delta': 20, 'fee-base': 200, 'fee-per-satoshi': 2000},
+                                                 {'cltv-delta': 30, 'cltv-final': 9, 'fee-base': 300, 'fee-per-satoshi': 3000}])
 
     ret = l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     assert ret['id'] == l2.info['id']
@@ -1178,9 +1198,9 @@ def test_forward_different_fees_and_cltv(node_factory, bitcoind):
 def test_forward_pad_fees_and_cltv(node_factory, bitcoind):
     """Test that we are allowed extra locktime delta, and fees"""
 
-    l1 = node_factory.get_node(options={'cltv-delta': 10, 'fee-base': 100, 'fee-per-satoshi': 1000})
-    l2 = node_factory.get_node(options={'cltv-delta': 20, 'fee-base': 200, 'fee-per-satoshi': 2000})
-    l3 = node_factory.get_node(options={'cltv-delta': 30, 'cltv-final': 9, 'fee-base': 300, 'fee-per-satoshi': 3000})
+    l1, l2, l3 = node_factory.get_nodes(3, opts=[{'cltv-delta': 10, 'fee-base': 100, 'fee-per-satoshi': 1000},
+                                                 {'cltv-delta': 20, 'fee-base': 200, 'fee-per-satoshi': 2000},
+                                                 {'cltv-delta': 30, 'cltv-final': 9, 'fee-base': 300, 'fee-per-satoshi': 3000}])
 
     ret = l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     assert ret['id'] == l2.info['id']
@@ -1236,9 +1256,8 @@ def test_forward_stats(node_factory, bitcoind):
 
     """
     amount = 10**5
-    l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=False)
-    l4 = node_factory.get_node()
-    l5 = node_factory.get_node(may_fail=True)
+    l1, l2, l3, l4, l5 = node_factory.get_nodes(5, opts=[{}] * 4 + [{'may_fail': True}])
+    node_factory.join_nodes([l1, l2, l3], wait_for_announce=False)
     l2.openchannel(l4, 10**6, wait_for_announce=False)
     l2.openchannel(l5, 10**6, wait_for_announce=True)
 
@@ -1303,7 +1322,8 @@ def test_forward_stats(node_factory, bitcoind):
     assert 'received_time' in stats['forwards'][2] and 'resolved_time' not in stats['forwards'][2]
 
 
-@unittest.skipIf(not DEVELOPER or (VALGRIND and SLOW_MACHINE), "Gossip too slow without DEVELOPER, and too stressful if VALGRIND on slow machines")
+@unittest.skipIf(not DEVELOPER, "too slow without --dev-fast-gossip")
+@pytest.mark.slow_test
 def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     """Check that we track forwarded payments correctly.
 
@@ -1347,12 +1367,12 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
 
     disconnects = ['-WIRE_UPDATE_FAIL_HTLC', 'permfail']
 
-    l1 = node_factory.get_node()
-    l2 = node_factory.get_node()
-    l3 = node_factory.get_node()
-    l4 = node_factory.get_node(disconnect=disconnects)
-    l5 = node_factory.get_node()
-    l6 = node_factory.get_node()
+    l1, l2, l3, l4, l5, l6 = node_factory.get_nodes(6, opts=[{},
+                                                             {},
+                                                             {},
+                                                             {'disconnect': disconnects},
+                                                             {},
+                                                             {}])
 
     l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
@@ -1362,7 +1382,7 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     c12 = l1.fund_channel(l2, 10**6)
     c23 = l2.fund_channel(l3, 10**6)
     c24 = l2.fund_channel(l4, 10**6)
-    c25 = l2.fund_channel(l5, 10**4)
+    c25 = l2.fund_channel(l5, 10**4 * 2)
     l6.fund_channel(l1, 10**6)
 
     # Make sure routes finalized.
@@ -1522,7 +1542,8 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     assert 'received_time' in stats['forwards'][3] and 'resolved_time' not in stats['forwards'][4]
 
 
-@unittest.skipIf(not DEVELOPER or SLOW_MACHINE, "needs DEVELOPER=1 for dev_ignore_htlcs, and temporarily disabled on Travis")
+@unittest.skipIf(not DEVELOPER, "too slow without --dev-fast-gossip")
+@pytest.mark.slow_test
 def test_htlcs_cltv_only_difference(node_factory, bitcoind):
     # l1 -> l2 -> l3 -> l4
     # l4 ignores htlcs, so they stay.
@@ -1599,7 +1620,7 @@ def test_pay_variants(node_factory):
 
 
 @unittest.skipIf(not DEVELOPER, "gossip without DEVELOPER=1 is slow")
-@unittest.skipIf(VALGRIND and SLOW_MACHINE, "Travis times out under valgrind")
+@pytest.mark.slow_test
 def test_pay_retry(node_factory, bitcoind, executor, chainparams):
     """Make sure pay command retries properly. """
 
@@ -1683,7 +1704,7 @@ def test_pay_retry(node_factory, bitcoind, executor, chainparams):
 
 
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1 otherwise gossip takes 5 minutes!")
-@unittest.skipIf(VALGRIND, "temporarily disabled due to timeouts")
+@pytest.mark.slow_test
 def test_pay_routeboost(node_factory, bitcoind, compat):
     """Make sure we can use routeboost information. """
     # l1->l2->l3--private-->l4
@@ -1813,12 +1834,10 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     DEF_BASE = 10
     DEF_PPM = 100
 
-    l1 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l2 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l3 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1, l2, l3 = node_factory.get_nodes(3,
+                                        opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
+    node_factory.join_nodes([l1, l2])
     l1.rpc.connect(l3.info['id'], 'localhost', l3.port)
-    l1.fund_channel(l2, 1000000)
 
     def channel_get_fees(scid):
         return l1.db.query(
@@ -1933,9 +1952,7 @@ def test_setchannelfee_state(node_factory, bitcoind):
     DEF_BASE = 0
     DEF_PPM = 0
 
-    l0 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l1 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l2 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
+    l0, l1, l2 = node_factory.get_nodes(3, opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
 
     # connection and funding
     l0.rpc.connect(l1.info['id'], 'localhost', l1.port)
@@ -2132,9 +2149,7 @@ def test_setchannelfee_all(node_factory, bitcoind):
     DEF_BASE = 10
     DEF_PPM = 100
 
-    l1 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l2 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
-    l3 = node_factory.get_node(options={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
+    l1, l2, l3 = node_factory.get_nodes(3, opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
     l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     l1.rpc.connect(l3.info['id'], 'localhost', l3.port)
     l1.fund_channel(l2, 1000000)
@@ -2351,16 +2366,11 @@ def test_error_returns_blockheight(node_factory, bitcoind):
 
 @unittest.skipIf(not DEVELOPER, 'Needs dev-routes')
 def test_tlv_or_legacy(node_factory, bitcoind):
-    l1, l2, l3 = node_factory.get_nodes(3,
-                                        opts={'plugin': os.path.join(os.getcwd(), 'tests/plugins/print_htlc_onion.py')})
+    l1, l2, l3 = node_factory.line_graph(3,
+                                         opts={'plugin': os.path.join(os.getcwd(), 'tests/plugins/print_htlc_onion.py')})
 
-    # Set up a channel from 1->2 first.
-    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
-    scid12 = l1.fund_channel(l2, 1000000)
-
-    # Now set up 2->3.
-    l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
-    scid23 = l2.fund_channel(l3, 1000000)
+    scid12 = l1.get_channel_scid(l2)
+    scid23 = l2.get_channel_scid(l3)
 
     # We need to force l3 to provide route hint from l2 (it won't normally,
     # since it sees l2 as a dead end).
@@ -2378,8 +2388,8 @@ def test_tlv_or_legacy(node_factory, bitcoind):
     l2.daemon.wait_for_log("Got onion.*'type': 'legacy'")
     l3.daemon.wait_for_log("Got onion.*'type': 'tlv'")
 
-    # Turns out we only need 3 more blocks to announce l1->l2 channel.
-    bitcoind.generate_block(3)
+    # We need 5 more blocks to announce l1->l2 channel.
+    bitcoind.generate_block(5)
 
     # Make sure l1 knows about l2
     wait_for(lambda: 'alias' in l1.rpc.listnodes(l2.info['id'])['nodes'][0])
@@ -3031,7 +3041,7 @@ def test_pay_exemptfee(node_factory, compat):
 
 
 @unittest.skipIf(not DEVELOPER, "Requires use_shadow flag")
-def test_pay_peer(node_factory):
+def test_pay_peer(node_factory, bitcoind):
     """If we have a direct channel to the destination we should use that.
 
     This is complicated a bit by not having sufficient capacity, but the
@@ -3042,11 +3052,10 @@ def test_pay_peer(node_factory):
      v  /
      l3
     """
-    l1, l2 = node_factory.line_graph(2, fundamount=10**6)
-    l3 = node_factory.get_node()
-
-    l1.openchannel(l3, 10**6, wait_for_announce=False)
-    l3.openchannel(l2, 10**6, wait_for_announce=True)
+    l1, l2, l3 = node_factory.get_nodes(3)
+    node_factory.join_nodes([l1, l2])
+    node_factory.join_nodes([l1, l3])
+    node_factory.join_nodes([l3, l2], wait_for_announce=True)
 
     wait_for(lambda: len(l1.rpc.listchannels()['channels']) == 6)
 
@@ -3221,3 +3230,146 @@ def test_bolt11_null_after_pay(node_factory, bitcoind):
     pays = l2.rpc.listpays()["pays"]
     assert(pays[0]["bolt11"] == invl1)
     assert('amount_msat' in pays[0] and pays[0]['amount_msat'] == amt)
+    assert('created_at' in pays[0])
+
+
+def test_mpp_presplit_routehint_conflict(node_factory, bitcoind):
+    '''
+    We had a bug where pre-splitting the payment prevents *any*
+    routehints from being taken.
+    We tickle that bug here by building l1->l2->l3, but with
+    l2->l3 as an unpublished channel.
+    If the payment is large enough to trigger pre-splitting, the
+    routehints are not applied in any of the splits.
+    '''
+    l1, l2, l3 = node_factory.get_nodes(3)
+
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1l2 = l1.fund_channel(l2, 10**7, announce_channel=True)
+    l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
+    l2.fund_channel(l3, 10**7, announce_channel=False)
+
+    bitcoind.generate_block(6)
+    sync_blockheight(bitcoind, [l1, l2, l3])
+
+    # Wait for l3 to learn about l1->l2, otherwise it will think
+    # l2 is a deadend and not add it to the routehint.
+    wait_for(lambda: len(l3.rpc.listchannels(l1l2)['channels']) >= 2)
+
+    inv = l3.rpc.invoice(Millisatoshi(2 * 10000 * 1000), 'i', 'i', exposeprivatechannels=True)['bolt11']
+
+    l1.rpc.pay(inv)
+
+
+def test_listpay_result_with_paymod(node_factory, bitcoind):
+    """
+    The object of this test is to verify the correct behavior
+    of the RPC command listpay e with two different type of
+    payment, such as: keysend (without invoice) and pay (with invoice).
+    l1 -> keysend -> l2
+    l2 -> pay invoice -> l3
+    """
+
+    amount_sat = 10 ** 6
+
+    l1, l2, l3 = node_factory.line_graph(3)
+
+    invl2 = l2.rpc.invoice(amount_sat * 2, "inv_l2", "inv_l2")
+    l1.rpc.pay(invl2['bolt11'])
+
+    l2.rpc.keysend(l3.info['id'], amount_sat * 2, "keysend_l3")
+
+    assert 'bolt11' in l1.rpc.listpays()['pays'][0]
+    assert 'bolt11' not in l2.rpc.listpays()['pays'][0]
+    assert 'payment_hash' in l2.rpc.listpays()['pays'][0]
+    assert 'payment_hash' in l1.rpc.listpays()['pays'][0]
+    assert 'destination' in l1.rpc.listpays()['pays'][0]
+    assert 'destination' in l2.rpc.listpays()['pays'][0]
+
+
+@unittest.skipIf(env('COMPAT') != 1, "legacypay requires COMPAT=1")
+def test_listpays_ongoing_attempt(node_factory, bitcoind, executor):
+    """Test to reproduce issue #3915.
+
+    The issue is that the bolt11 string is not initialized if the root payment
+    was split (no attempt with the bolt11 annotation ever hit `lightningd`,
+    hence we cannot filter by that. In addition keysends never have a bolt11
+    string, so we need to switch to payment_hash comparisons anyway.
+    """
+    plugin = os.path.join(os.path.dirname(__file__), 'plugins', 'hold_htlcs.py')
+    l1, l2, l3 = node_factory.line_graph(3, opts=[{}, {}, {'plugin': plugin}],
+                                         wait_for_announce=True)
+
+    f = executor.submit(l1.rpc.keysend, l3.info['id'], 100)
+    l3.daemon.wait_for_log(r'Holding onto an incoming htlc')
+    l1.rpc.listpays()
+    f.result()
+
+    inv = l2.rpc.invoice(10**6, 'legacy', 'desc')['bolt11']
+    l1.rpc.legacypay(inv)
+    l1.rpc.listpays()
+
+    # Produce loads of parts to increase probability of hitting the issue,
+    # should result in 100 splits at least
+    inv = l3.rpc.invoice(10**9, 'mpp invoice', 'desc')['bolt11']
+
+    # Start the payment, it'll get stuck for 10 seconds at l3
+    executor.submit(l1.rpc.pay, inv)
+    l1.daemon.wait_for_log(r'Split into [0-9]+ sub-payments due to initial size')
+    l3.daemon.wait_for_log(r'Holding onto an incoming htlc')
+
+    # While that is going on, check in with `listpays` to see if aggregation
+    # is working.
+    l1.rpc.listpays()
+
+    # Now restart and see if we still can aggregate things correctly.
+    l1.restart()
+    l1.rpc.listpays()
+
+
+@unittest.skipIf(not DEVELOPER, "needs use_shadow")
+def test_mpp_waitblockheight_routehint_conflict(node_factory, bitcoind, executor):
+    '''
+    We have a bug where a blockheight disagreement between us and
+    the receiver causes us to advance through the routehints a bit
+    too aggressively.
+    '''
+    l1, l2, l3 = node_factory.get_nodes(3)
+
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1l2 = l1.fund_channel(l2, 10**7, announce_channel=True)
+    l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
+    l2.fund_channel(l3, 10**7, announce_channel=False)
+
+    bitcoind.generate_block(6)
+    sync_blockheight(bitcoind, [l1, l2, l3])
+
+    # Wait for l3 to learn about l1->l2, otherwise it will think
+    # l2 is a deadend and not add it to the routehint.
+    wait_for(lambda: len(l3.rpc.listchannels(l1l2)['channels']) >= 2)
+
+    # Now make the l1 payer stop receiving blocks.
+    def no_more_blocks(req):
+        return {"result": None,
+                "error": {"code": -8, "message": "Block height out of range"}, "id": req['id']}
+    l1.daemon.rpcproxy.mock_rpc('getblockhash', no_more_blocks)
+
+    # Increase blockheight by 2, like in test_blockheight_disagreement.
+    bitcoind.generate_block(2)
+    sync_blockheight(bitcoind, [l3])
+
+    inv = l3.rpc.invoice(Millisatoshi(2 * 10000 * 1000), 'i', 'i', exposeprivatechannels=True)['bolt11']
+
+    # Have l1 pay l3
+    def pay(l1, inv):
+        l1.rpc.dev_pay(inv, use_shadow=False)
+    fut = executor.submit(pay, l1, inv)
+
+    # Make sure l1 sends out the HTLC.
+    l1.daemon.wait_for_logs([r'NEW:: HTLC LOCAL'])
+
+    # Unblock l1 from new blocks.
+    l1.daemon.rpcproxy.mock_rpc('getblockhash', None)
+
+    # pay command should complete without error
+    fut.result(TIMEOUT)

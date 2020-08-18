@@ -113,10 +113,11 @@ static bool wallet_add_utxo(struct wallet *w, struct utxo *utxo,
 		       ", channel_id"
 		       ", peer_id"
 		       ", commitment_point"
+		       ", option_anchor_outputs"
 		       ", confirmation_height"
 		       ", spend_height"
 		       ", scriptpubkey"
-		       ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"));
+		       ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"));
 	db_bind_txid(stmt, 0, &utxo->txid);
 	db_bind_int(stmt, 1, utxo->outnum);
 	db_bind_amount_sat(stmt, 2, &utxo->amount);
@@ -130,23 +131,25 @@ static bool wallet_add_utxo(struct wallet *w, struct utxo *utxo,
 			db_bind_pubkey(stmt, 8, utxo->close_info->commitment_point);
 		else
 			db_bind_null(stmt, 8);
+		db_bind_int(stmt, 9, utxo->close_info->option_anchor_outputs);
 	} else {
 		db_bind_null(stmt, 6);
 		db_bind_null(stmt, 7);
 		db_bind_null(stmt, 8);
+		db_bind_null(stmt, 9);
 	}
 
 	if (utxo->blockheight) {
-		db_bind_int(stmt, 9, *utxo->blockheight);
+		db_bind_int(stmt, 10, *utxo->blockheight);
 	} else
-		db_bind_null(stmt, 9);
-
-	if (utxo->spendheight)
-		db_bind_int(stmt, 10, *utxo->spendheight);
-	else
 		db_bind_null(stmt, 10);
 
-	db_bind_blob(stmt, 11, utxo->scriptPubkey,
+	if (utxo->spendheight)
+		db_bind_int(stmt, 11, *utxo->spendheight);
+	else
+		db_bind_null(stmt, 11);
+
+	db_bind_blob(stmt, 12, utxo->scriptPubkey,
 			  tal_bytelen(utxo->scriptPubkey));
 
 	db_exec_prepared_v2(take(stmt));
@@ -177,34 +180,35 @@ static struct utxo *wallet_stmt2output(const tal_t *ctx, struct db_stmt *stmt)
 					 utxo->close_info->commitment_point);
 		} else
 			utxo->close_info->commitment_point = NULL;
+		utxo->close_info->option_anchor_outputs
+			= db_column_int(stmt, 9);
 	} else {
 		utxo->close_info = NULL;
 	}
 
 	utxo->scriptPubkey =
-	    tal_dup_arr(utxo, u8, db_column_blob(stmt, 11),
-			db_column_bytes(stmt, 11), 0);
+	    tal_dup_arr(utxo, u8, db_column_blob(stmt, 12),
+			db_column_bytes(stmt, 12), 0);
 
 	utxo->blockheight = NULL;
 	utxo->spendheight = NULL;
-	utxo->scriptSig = NULL;
 	utxo->reserved_til = NULL;
 
-	if (!db_column_is_null(stmt, 9)) {
+	if (!db_column_is_null(stmt, 10)) {
 		blockheight = tal(utxo, u32);
-		*blockheight = db_column_int(stmt, 9);
+		*blockheight = db_column_int(stmt, 10);
 		utxo->blockheight = blockheight;
 	}
 
-	if (!db_column_is_null(stmt, 10)) {
+	if (!db_column_is_null(stmt, 11)) {
 		spendheight = tal(utxo, u32);
-		*spendheight = db_column_int(stmt, 10);
+		*spendheight = db_column_int(stmt, 11);
 		utxo->spendheight = spendheight;
 	}
 
-	if (!db_column_is_null(stmt, 12)) {
+	if (!db_column_is_null(stmt, 13)) {
 		reserved_til = tal(utxo, u32);
-		*reserved_til = db_column_int(stmt, 12);
+		*reserved_til = db_column_int(stmt, 13);
 		utxo->reserved_til = reserved_til;
 	}
 
@@ -257,6 +261,7 @@ struct utxo **wallet_get_utxos(const tal_t *ctx, struct wallet *w, const enum ou
 						", channel_id"
 						", peer_id"
 						", commitment_point"
+						", option_anchor_outputs"
 						", confirmation_height"
 						", spend_height"
 						", scriptpubkey "
@@ -273,6 +278,7 @@ struct utxo **wallet_get_utxos(const tal_t *ctx, struct wallet *w, const enum ou
 						", channel_id"
 						", peer_id"
 						", commitment_point"
+						", option_anchor_outputs"
 						", confirmation_height"
 						", spend_height"
 						", scriptpubkey "
@@ -310,6 +316,7 @@ struct utxo **wallet_get_unconfirmed_closeinfo_utxos(const tal_t *ctx,
 					", channel_id"
 					", peer_id"
 					", commitment_point"
+					", option_anchor_outputs"
 					", confirmation_height"
 					", spend_height"
 					", scriptpubkey"
@@ -346,6 +353,7 @@ struct utxo *wallet_utxo_get(const tal_t *ctx, struct wallet *w,
 					", channel_id"
 					", peer_id"
 					", commitment_point"
+					", option_anchor_outputs"
 					", confirmation_height"
 					", spend_height"
 					", scriptpubkey"
@@ -543,6 +551,7 @@ struct utxo *wallet_find_utxo(const tal_t *ctx, struct wallet *w,
 					", channel_id"
 					", peer_id"
 					", commitment_point"
+					", option_anchor_outputs"
 					", confirmation_height"
 					", spend_height"
 					", scriptpubkey "
@@ -607,10 +616,11 @@ bool wallet_add_onchaind_utxo(struct wallet *w,
 		       ", channel_id"
 		       ", peer_id"
 		       ", commitment_point"
+		       ", option_anchor_outputs"
 		       ", confirmation_height"
 		       ", spend_height"
 		       ", scriptpubkey"
-		       ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"));
+		       ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"));
 	db_bind_txid(stmt, 0, txid);
 	db_bind_int(stmt, 1, outnum);
 	db_bind_amount_sat(stmt, 2, &amount);
@@ -624,11 +634,12 @@ bool wallet_add_onchaind_utxo(struct wallet *w,
 	else
 		db_bind_null(stmt, 8);
 
-	db_bind_int(stmt, 9, blockheight);
+	db_bind_int(stmt, 9, channel->option_anchor_outputs);
+	db_bind_int(stmt, 10, blockheight);
 
 	/* spendheight */
-	db_bind_null(stmt, 10);
-	db_bind_blob(stmt, 11, scriptpubkey, tal_bytelen(scriptpubkey));
+	db_bind_null(stmt, 11);
+	db_bind_blob(stmt, 12, scriptpubkey, tal_bytelen(scriptpubkey));
 
 	db_exec_prepared_v2(take(stmt));
 	return true;
@@ -1014,20 +1025,32 @@ done:
 	return peer;
 }
 
-static secp256k1_ecdsa_signature *
-wallet_htlc_sigs_load(const tal_t *ctx, struct wallet *w, u64 channelid)
+static struct bitcoin_signature *
+wallet_htlc_sigs_load(const tal_t *ctx, struct wallet *w, u64 channelid,
+		      bool option_anchor_outputs)
 {
 	struct db_stmt *stmt;
+	struct bitcoin_signature *htlc_sigs = tal_arr(ctx, struct bitcoin_signature, 0);
 
 	stmt = db_prepare_v2(
 	    w->db, SQL("SELECT signature FROM htlc_sigs WHERE channelid = ?"));
-	secp256k1_ecdsa_signature *htlc_sigs = tal_arr(ctx, secp256k1_ecdsa_signature, 0);
 	db_bind_u64(stmt, 0, channelid);
 	db_query_prepared(stmt);
 
 	while (db_step(stmt)) {
-		secp256k1_ecdsa_signature sig;
-		db_column_signature(stmt, 0, &sig);
+		struct bitcoin_signature sig;
+		db_column_signature(stmt, 0, &sig.s);
+		/* BOLT-a12da24dd0102c170365124782b46d9710950ac1 #3:
+		 * ## HTLC-Timeout and HTLC-Success Transactions
+		 *...
+		 * * if `option_anchor_outputs` applies to this commitment
+		 *   transaction, `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is
+		 *   used.
+		 */
+		if (option_anchor_outputs)
+			sig.sighash_type = SIGHASH_SINGLE|SIGHASH_ANYONECANPAY;
+		else
+			sig.sighash_type = SIGHASH_ALL;
 		tal_arr_expand(&htlc_sigs, sig);
 	}
 	tal_free(stmt);
@@ -1162,7 +1185,7 @@ static struct channel *wallet_stmt2channel(struct wallet *w, struct db_stmt *stm
 	ok &= wallet_shachain_load(w, db_column_u64(stmt, 28), &wshachain);
 
 	remote_shutdown_scriptpubkey = db_column_arr(tmpctx, stmt, 29, u8);
-	local_shutdown_scriptpubkey = db_column_arr(tmpctx, stmt, 47, u8);
+	local_shutdown_scriptpubkey = db_column_arr(tmpctx, stmt, 48, u8);
 
 	/* Do we have a last_sent_commit, if yes, populate */
 	if (!db_column_is_null(stmt, 42)) {
@@ -1265,7 +1288,8 @@ static struct channel *wallet_stmt2channel(struct wallet *w, struct db_stmt *stm
 			   db_column_psbt_to_tx(tmpctx, stmt, 33),
 			   &last_sig,
 			   wallet_htlc_sigs_load(tmpctx, w,
-						 db_column_u64(stmt, 0)),
+						 db_column_u64(stmt, 0),
+						 db_column_int(stmt, 47)),
 			   &channel_info,
 			   remote_shutdown_scriptpubkey,
 			   local_shutdown_scriptpubkey,
@@ -1282,7 +1306,8 @@ static struct channel *wallet_stmt2channel(struct wallet *w, struct db_stmt *stm
 			   db_column_int(stmt, 43),
 			   db_column_int(stmt, 44),
 			   db_column_arr(tmpctx, stmt, 45, u8),
-			   db_column_int(stmt, 46));
+			   db_column_int(stmt, 46),
+			   db_column_int(stmt, 47));
 
 	return chan;
 }
@@ -1357,6 +1382,7 @@ static bool wallet_channels_load_active(struct wallet *w)
 					", feerate_ppm"
 					", remote_upfront_shutdown_script"
 					", option_static_remotekey"
+					", option_anchor_outputs"
 					", shutdown_scriptpubkey_local"
 					" FROM channels WHERE state < ?;"));
 	db_bind_int(stmt, 0, CLOSED);
@@ -1622,6 +1648,7 @@ void wallet_channel_save(struct wallet *w, struct channel *chan)
 					"  feerate_ppm=?,"
 					"  remote_upfront_shutdown_script=?,"
 					"  option_static_remotekey=?,"
+					"  option_anchor_outputs=?,"
 					"  shutdown_scriptpubkey_local=?"
 					" WHERE id=?"));
 	db_bind_u64(stmt, 0, chan->their_shachain.id);
@@ -1672,9 +1699,10 @@ void wallet_channel_save(struct wallet *w, struct channel *chan)
 		db_bind_null(stmt, 28);
 
 	db_bind_int(stmt, 29, chan->option_static_remotekey);
-	db_bind_blob(stmt, 30, chan->shutdown_scriptpubkey[LOCAL],
+	db_bind_int(stmt, 30, chan->option_anchor_outputs);
+	db_bind_blob(stmt, 31, chan->shutdown_scriptpubkey[LOCAL],
 		     tal_count(chan->shutdown_scriptpubkey[LOCAL]));
-	db_bind_u64(stmt, 31, chan->dbid);
+	db_bind_u64(stmt, 32, chan->dbid);
 	db_exec_prepared_v2(take(stmt));
 
 	wallet_channel_config_save(w, &chan->channel_info.their_config);
@@ -3064,7 +3092,7 @@ wallet_payment_list(const tal_t *ctx,
 }
 
 void wallet_htlc_sigs_save(struct wallet *w, u64 channel_id,
-			   secp256k1_ecdsa_signature *htlc_sigs)
+			   const struct bitcoin_signature *htlc_sigs)
 {
 	/* Clear any existing HTLC sigs for this channel */
 	struct db_stmt *stmt = db_prepare_v2(
@@ -3078,7 +3106,7 @@ void wallet_htlc_sigs_save(struct wallet *w, u64 channel_id,
 				     SQL("INSERT INTO htlc_sigs (channelid, "
 					 "signature) VALUES (?, ?)"));
 		db_bind_u64(stmt, 0, channel_id);
-		db_bind_signature(stmt, 1, &htlc_sigs[i]);
+		db_bind_signature(stmt, 1, &htlc_sigs[i].s);
 		db_exec_prepared_v2(take(stmt));
 	}
 }
@@ -3381,14 +3409,14 @@ struct outpoint *wallet_outpoint_for_scid(struct wallet *w, tal_t *ctx,
 	return op;
 }
 
-void wallet_transaction_add(struct wallet *w, const struct bitcoin_tx *tx,
+void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
 			    const u32 blockheight, const u32 txindex)
 {
 	struct bitcoin_txid txid;
 	struct db_stmt *stmt = db_prepare_v2(
 	    w->db, SQL("SELECT blockheight FROM transactions WHERE id=?"));
 
-	bitcoin_txid(tx, &txid);
+	wally_txid(tx, &txid);
 	db_bind_txid(stmt, 0, &txid);
 	db_query_prepared(stmt);
 

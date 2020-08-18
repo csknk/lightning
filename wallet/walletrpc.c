@@ -543,7 +543,7 @@ static struct command_result *json_txsend(struct command *cmd,
 	/* We're the owning cmd now. */
 	utx->wtx->cmd = cmd;
 
-	wallet_transaction_add(cmd->ld->wallet, utx->tx, 0, 0);
+	wallet_transaction_add(cmd->ld->wallet, utx->tx->wtx, 0, 0);
 	wallet_transaction_annotate(cmd->ld->wallet, &utx->txid,
 				    TX_UNKNOWN, 0);
 
@@ -610,7 +610,7 @@ static struct command_result *json_withdraw(struct command *cmd,
 		return res;
 
 	/* Store the transaction in the DB and annotate it as a withdrawal */
-	wallet_transaction_add(cmd->ld->wallet, utx->tx, 0, 0);
+	wallet_transaction_add(cmd->ld->wallet, utx->tx->wtx, 0, 0);
 	wallet_transaction_annotate(cmd->ld->wallet, &utx->txid,
 				    TX_WALLET_WITHDRAWAL, 0);
 
@@ -867,6 +867,14 @@ static void json_add_utxo(struct json_stream *response,
 	json_add_num(response, "output", utxo->outnum);
 	json_add_amount_sat_compat(response, utxo->amount,
 				   "value", "amount_msat");
+
+	if (utxo->is_p2sh) {
+		struct pubkey key;
+		bip32_pubkey(wallet->bip32_base, &key, utxo->keyindex);
+
+		json_add_hex_talarr(response, "redeemscript",
+				    bitcoin_redeem_p2sh_p2wpkh(tmpctx, &key));
+	}
 
 	json_add_hex_talarr(response, "scriptpubkey", utxo->scriptPubkey);
 	out = encode_scriptpubkey_to_addr(tmpctx, chainparams,
@@ -1203,11 +1211,8 @@ struct command_result *param_psbt(struct command *cmd,
 				  const jsmntok_t *tok,
 				  struct wally_psbt **psbt)
 {
-	/* Pull out the token into a string, then pass to
-	 * the PSBT parser; PSBT parser can't handle streaming
-	 * atm as it doesn't accept a len value */
-	char *psbt_buff = json_strdup(cmd, buffer, tok);
-	if (psbt_from_b64(psbt_buff, psbt))
+	*psbt = psbt_from_b64(cmd, buffer + tok->start, tok->end - tok->start);
+	if (*psbt)
 		return NULL;
 
 	return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
@@ -1312,6 +1317,7 @@ static struct command_result *json_sendpsbt(struct command *cmd,
 	struct wally_tx *w_tx;
 	struct tx_broadcast *txb;
 	struct utxo **utxos;
+	struct bitcoin_txid txid;
 
 	if (!param(cmd, buffer, params,
 		   p_req("psbt", param_psbt, &psbt),
@@ -1338,6 +1344,12 @@ static struct command_result *json_sendpsbt(struct command *cmd,
 	txb->wtx = tal_steal(txb, w_tx);
 	txb->cmd = cmd;
 	txb->expected_change = NULL;
+
+	/* FIXME: Do this *after* successful broadcast! */
+	wallet_transaction_add(cmd->ld->wallet, txb->wtx, 0, 0);
+	wally_txid(txb->wtx, &txid);
+	wallet_transaction_annotate(cmd->ld->wallet, &txid,
+				    TX_UNKNOWN, 0);
 
 	/* Now broadcast the transaction */
 	bitcoind_sendrawtx(cmd->ld->topology->bitcoind,

@@ -97,7 +97,7 @@ void json_add_payment_fields(struct json_stream *response,
 	if (amount_msat_greater(t->msatoshi, AMOUNT_MSAT(0)))
 		json_add_amount_msat_compat(response, t->msatoshi, "msatoshi",
 					    "amount_msat");
-	else
+	else if (deprecated_apis)
 		json_add_null(response, "amount_msat");
 
 
@@ -1178,6 +1178,7 @@ static struct command_result *json_sendonion(struct command *cmd,
 	struct sha256 *payment_hash;
 	struct lightningd *ld = cmd->ld;
 	const char *label, *b11str;
+	struct node_id *destination;
 	struct secret *path_secrets;
 	struct amount_msat *msat;
 	u64 *partid;
@@ -1191,6 +1192,7 @@ static struct command_result *json_sendonion(struct command *cmd,
 		   p_opt_def("partid", param_u64, &partid, 0),
 		   p_opt("bolt11", param_string, &b11str),
 		   p_opt_def("msatoshi", param_msat, &msat, AMOUNT_MSAT(0)),
+		   p_opt("destination", param_node_id, &destination),
 		   NULL))
 		return command_param_failed();
 
@@ -1204,7 +1206,7 @@ static struct command_result *json_sendonion(struct command *cmd,
 
 	return send_payment_core(ld, cmd, payment_hash, *partid,
 				 first_hop, *msat, AMOUNT_MSAT(0),
-				 label, b11str, &packet, NULL, NULL, NULL,
+				 label, b11str, &packet, destination, NULL, NULL,
 				 path_secrets);
 }
 

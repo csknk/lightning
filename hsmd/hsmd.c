@@ -1034,10 +1034,12 @@ static struct io_plan *handle_sign_remote_htlc_tx(struct io_conn *conn,
 	u8 *wscript;
 	struct privkey htlc_privkey;
 	struct pubkey htlc_pubkey;
+	bool option_anchor_outputs;
 
 	if (!fromwire_hsm_sign_remote_htlc_tx(tmpctx, msg_in,
 					      &tx, &wscript,
-					      &remote_per_commit_point))
+					      &remote_per_commit_point,
+					      &option_anchor_outputs))
 		return bad_req(conn, c, msg_in);
 	tx->chainparams = c->chainparams;
 	get_channel_seed(&c->id, c->dbid, &channel_seed);
@@ -1056,8 +1058,16 @@ static struct io_plan *handle_sign_remote_htlc_tx(struct io_conn *conn,
 		return bad_req_fmt(conn, c, msg_in,
 				   "Failed deriving htlc pubkey");
 
+	/* BOLT-a12da24dd0102c170365124782b46d9710950ac1 #3:
+	 * ## HTLC-Timeout and HTLC-Success Transactions
+	 *...
+	 * * if `option_anchor_outputs` applies to this commitment transaction,
+	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used.
+	 */
 	sign_tx_input(tx, 0, NULL, wscript, &htlc_privkey, &htlc_pubkey,
-		      SIGHASH_ALL, &sig);
+		      option_anchor_outputs
+		      ? (SIGHASH_SINGLE|SIGHASH_ANYONECANPAY)
+		      : SIGHASH_ALL, &sig);
 
 	return req_reply(conn, c, take(towire_hsm_sign_tx_reply(NULL, &sig)));
 }
@@ -1070,7 +1080,8 @@ static struct io_plan *handle_sign_to_us_tx(struct io_conn *conn,
 					    const u8 *msg_in,
 					    struct bitcoin_tx *tx,
 					    const struct privkey *privkey,
-					    const u8 *wscript)
+					    const u8 *wscript,
+					    enum sighash_type sighash_type)
 {
 	struct bitcoin_signature sig;
 	struct pubkey pubkey;
@@ -1081,7 +1092,7 @@ static struct io_plan *handle_sign_to_us_tx(struct io_conn *conn,
 	if (tx->wtx->num_inputs != 1)
 		return bad_req_fmt(conn, c, msg_in, "bad txinput count");
 
-	sign_tx_input(tx, 0, NULL, wscript, privkey, &pubkey, SIGHASH_ALL, &sig);
+	sign_tx_input(tx, 0, NULL, wscript, privkey, &pubkey, sighash_type, &sig);
 
 	return req_reply(conn, c, take(towire_hsm_sign_tx_reply(NULL, &sig)));
 }
@@ -1139,7 +1150,8 @@ static struct io_plan *handle_sign_delayed_payment_to_us(struct io_conn *conn,
 		return bad_req_fmt(conn, c, msg_in, "failed deriving privkey");
 
 	return handle_sign_to_us_tx(conn, c, msg_in,
-				    tx, &privkey, wscript);
+				    tx, &privkey, wscript,
+				    SIGHASH_ALL);
 }
 
 /*~ This is used when a commitment transaction is onchain, and has an HTLC
@@ -1155,10 +1167,12 @@ static struct io_plan *handle_sign_remote_htlc_to_us(struct io_conn *conn,
 	struct pubkey remote_per_commitment_point;
 	struct privkey privkey;
 	u8 *wscript;
+	bool option_anchor_outputs;
 
 	if (!fromwire_hsm_sign_remote_htlc_to_us(tmpctx, msg_in,
 						 &remote_per_commitment_point,
-						 &tx, &wscript))
+						 &tx, &wscript,
+						 &option_anchor_outputs))
 		return bad_req(conn, c, msg_in);
 
 	tx->chainparams = c->chainparams;
@@ -1176,8 +1190,17 @@ static struct io_plan *handle_sign_remote_htlc_to_us(struct io_conn *conn,
 		return bad_req_fmt(conn, c, msg_in,
 				   "Failed deriving htlc privkey");
 
+	/* BOLT-a12da24dd0102c170365124782b46d9710950ac1 #3:
+	 * ## HTLC-Timeout and HTLC-Success Transactions
+	 *...
+	 * * if `option_anchor_outputs` applies to this commitment transaction,
+	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used.
+	 */
 	return handle_sign_to_us_tx(conn, c, msg_in,
-				    tx, &privkey, wscript);
+				    tx, &privkey, wscript,
+				    option_anchor_outputs
+				    ? (SIGHASH_SINGLE|SIGHASH_ANYONECANPAY)
+				    : SIGHASH_ALL);
 }
 
 /*~ This is used when the remote peer's commitment transaction is revoked;
@@ -1219,7 +1242,8 @@ static struct io_plan *handle_sign_penalty_to_us(struct io_conn *conn,
 				   "Failed deriving revocation privkey");
 
 	return handle_sign_to_us_tx(conn, c, msg_in,
-				    tx, &privkey, wscript);
+				    tx, &privkey, wscript,
+				    SIGHASH_ALL);
 }
 
 /*~ This is used when a commitment transaction is onchain, and has an HTLC
@@ -1238,9 +1262,11 @@ static struct io_plan *handle_sign_local_htlc_tx(struct io_conn *conn,
 	struct bitcoin_signature sig;
 	struct privkey htlc_privkey;
 	struct pubkey htlc_pubkey;
+	bool option_anchor_outputs;
 
 	if (!fromwire_hsm_sign_local_htlc_tx(tmpctx, msg_in,
-					     &commit_num, &tx, &wscript))
+					     &commit_num, &tx, &wscript,
+					     &option_anchor_outputs))
 		return bad_req(conn, c, msg_in);
 
 	tx->chainparams = c->chainparams;
@@ -1274,8 +1300,18 @@ static struct io_plan *handle_sign_local_htlc_tx(struct io_conn *conn,
 		return bad_req_fmt(conn, c, msg_in, "bad txinput count");
 
 	/* FIXME: Check that output script is correct! */
+
+	/* BOLT-a12da24dd0102c170365124782b46d9710950ac1 #3:
+	 * ## HTLC-Timeout and HTLC-Success Transactions
+	 *...
+	 * * if `option_anchor_outputs` applies to this commitment transaction,
+	 *   `SIGHASH_SINGLE|SIGHASH_ANYONECANPAY` is used.
+	 */
 	sign_tx_input(tx, 0, NULL, wscript, &htlc_privkey, &htlc_pubkey,
-		      SIGHASH_ALL, &sig);
+		      option_anchor_outputs
+		      ? (SIGHASH_SINGLE|SIGHASH_ANYONECANPAY)
+		      : SIGHASH_ALL,
+		      &sig);
 
 	return req_reply(conn, c, take(towire_hsm_sign_tx_reply(NULL, &sig)));
 }
@@ -1494,7 +1530,7 @@ static void hsm_unilateral_close_privkey(struct privkey *dst,
 	}
 }
 
-/* This gets the bitcoin private key needed to spend from our wallet. */
+/* This gets the bitcoin private key needed to spend from our wallet */
 static void hsm_key_for_utxo(struct privkey *privkey, struct pubkey *pubkey,
 			     const struct utxo *utxo)
 {
@@ -1531,7 +1567,7 @@ static void sign_our_inputs(struct utxo **utxos, struct wally_psbt *psbt)
 			/* This line is basically the entire reason we have
 			 * to iterate through to match the psbt input
 			 * to the UTXO -- otherwise we would just
-			 * call wally_sign_psbt for every utxo privkey
+			 * call wally_psbt_sign for every utxo privkey
 			 * and be done with it. We can't do that though
 			 * because any UTXO that's derived from channel_info
 			 * requires the HSM to find the pubkey, and we
@@ -1539,8 +1575,16 @@ static void sign_our_inputs(struct utxo **utxos, struct wally_psbt *psbt)
 			 * of complexity in the calling code */
 			psbt_input_add_pubkey(psbt, j, &pubkey);
 
-			if (wally_sign_psbt(psbt, privkey.secret.data,
-					    sizeof(privkey.secret.data)) != WALLY_OK)
+			/* It's actually a P2WSH in this case. */
+			if (utxo->close_info && utxo->close_info->option_anchor_outputs) {
+				psbt_input_set_prev_utxo_wscript(psbt, j,
+								 anchor_to_remote_redeem(tmpctx,
+											 &pubkey),
+								 utxo->amount);
+			}
+			if (wally_psbt_sign(psbt, privkey.secret.data,
+					    sizeof(privkey.secret.data),
+					    EC_FLAG_GRIND_R) != WALLY_OK)
 				status_broken("Received wally_err attempting to "
 					      "sign utxo with key %s. PSBT: %s",
 					      type_to_string(tmpctx, struct pubkey,

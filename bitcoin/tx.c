@@ -16,21 +16,6 @@
 
 #define SEGREGATED_WITNESS_FLAG 0x1
 
-/* FIXME: When wally exposes this, we will clash and can remove this one */
-int wally_tx_clone(struct wally_tx *tx, struct wally_tx **output)
-{
-	u8 *txlin = linearize_wtx(NULL, tx);
-	int flags = WALLY_TX_FLAG_USE_WITNESS;
-	int ret;
-
-	if (chainparams->is_elements)
-		flags |= WALLY_TX_FLAG_USE_ELEMENTS;
-
-	ret = wally_tx_from_bytes(txlin, tal_bytelen(txlin), flags, output);
-	tal_free(txlin);
-	return ret;
-}
-
 struct bitcoin_tx_output *new_tx_output(const tal_t *ctx,
 					struct amount_sat amount,
 					const u8 *script)
@@ -41,19 +26,12 @@ struct bitcoin_tx_output *new_tx_output(const tal_t *ctx,
 	return output;
 }
 
-int bitcoin_tx_add_output(struct bitcoin_tx *tx, const u8 *script,
-			  u8 *wscript, struct amount_sat amount)
+struct wally_tx_output *wally_tx_output(const u8 *script,
+					struct amount_sat amount)
 {
-	size_t i = tx->wtx->num_outputs;
+	u64 satoshis = amount.satoshis; /* Raw: wally API */
 	struct wally_tx_output *output;
-	struct wally_psbt_output *psbt_out;
 	int ret;
-	u64 satoshis = amount.satoshis; /* Raw: low-level helper */
-	const struct chainparams *chainparams = tx->chainparams;
-	assert(i < tx->wtx->outputs_allocation_len);
-
-	assert(tx->wtx != NULL);
-	assert(chainparams);
 
 	if (chainparams->is_elements) {
 		u8 value[9];
@@ -63,15 +41,36 @@ int bitcoin_tx_add_output(struct bitcoin_tx *tx, const u8 *script,
 		ret = wally_tx_elements_output_init_alloc(
 		    script, tal_bytelen(script), chainparams->fee_asset_tag, 33,
 		    value, sizeof(value), NULL, 0, NULL, 0, NULL, 0, &output);
-		assert(ret == WALLY_OK);
+		if (ret != WALLY_OK)
+			return NULL;
+
 		/* Cheat a bit by also setting the numeric satoshi value,
 		 * otherwise we end up converting a number of times */
 		output->satoshi = satoshis;
 	} else {
 		ret = wally_tx_output_init_alloc(satoshis, script,
 						 tal_bytelen(script), &output);
-		assert(ret == WALLY_OK);
+		if (ret != WALLY_OK)
+			return NULL;
 	}
+	return output;
+}
+
+int bitcoin_tx_add_output(struct bitcoin_tx *tx, const u8 *script,
+			  u8 *wscript, struct amount_sat amount)
+{
+	size_t i = tx->wtx->num_outputs;
+	struct wally_tx_output *output;
+	struct wally_psbt_output *psbt_out;
+	int ret;
+	const struct chainparams *chainparams = tx->chainparams;
+	assert(i < tx->wtx->outputs_allocation_len);
+
+	assert(tx->wtx != NULL);
+	assert(chainparams);
+
+	output = wally_tx_output(script, amount);
+	assert(output);
 	ret = wally_tx_add_output(tx->wtx, output);
 	assert(ret == WALLY_OK);
 
@@ -194,14 +193,26 @@ int bitcoin_tx_add_input(struct bitcoin_tx *tx, const struct bitcoin_txid *txid,
 
 	assert(tx->wtx != NULL);
 	i = tx->wtx->num_inputs;
-	wally_err = wally_tx_input_init_alloc(txid->shad.sha.u.u8,
-					      sizeof(struct bitcoin_txid),
-					      outnum, sequence,
-					      scriptSig, tal_bytelen(scriptSig),
-					      NULL /* Empty witness stack */,
-					      &input);
+	if (chainparams->is_elements)
+		wally_err =
+			wally_tx_elements_input_init_alloc(txid->shad.sha.u.u8,
+							   sizeof(struct bitcoin_txid),
+							   outnum, sequence,
+							   scriptSig, tal_bytelen(scriptSig),
+							   NULL /* Empty witness stack */,
+							   NULL, 0, NULL, 0,
+							   NULL, 0, NULL, 0,
+							   NULL, 0, NULL, 0,
+							   NULL, &input);
+	else
+		wally_err = wally_tx_input_init_alloc(txid->shad.sha.u.u8,
+						      sizeof(struct bitcoin_txid),
+						      outnum, sequence,
+						      scriptSig, tal_bytelen(scriptSig),
+						      NULL /* Empty witness stack */,
+						      &input);
+
 	assert(wally_err == WALLY_OK);
-	input->features = chainparams->is_elements ? WALLY_TX_IS_ELEMENTS : 0;
 	wally_tx_add_input(tx->wtx, input);
 	psbt_add_input(tx->psbt, input, i);
 
@@ -393,7 +404,7 @@ void bitcoin_tx_input_set_script(struct bitcoin_tx *tx, int innum, u8 *script)
 	/* Also add to the psbt */
 	assert(innum < tx->psbt->num_inputs);
 	in = &tx->psbt->inputs[innum];
-	wally_psbt_input_set_final_script_sig(in, script, tal_bytelen(script));
+	wally_psbt_input_set_final_scriptsig(in, script, tal_bytelen(script));
 }
 
 const u8 *bitcoin_tx_input_get_witness(const tal_t *ctx,
@@ -540,7 +551,7 @@ struct bitcoin_tx *bitcoin_tx_with_psbt(const tal_t *ctx, struct wally_psbt *psb
 					   psbt->tx->locktime);
 	wally_tx_free(tx->wtx);
 	tx->wtx = psbt_finalize(psbt, false);
-	if (!tx->wtx && wally_tx_clone(psbt->tx, &tx->wtx) != WALLY_OK)
+	if (!tx->wtx && wally_tx_clone_alloc(psbt->tx, 0, &tx->wtx) != WALLY_OK)
 		return NULL;
 
 	tal_free(tx->psbt);
@@ -566,14 +577,7 @@ struct bitcoin_tx *pull_bitcoin_tx(const tal_t *ctx, const u8 **cursor,
 
 	tal_add_destructor(tx, bitcoin_tx_destroy);
 
-	/* For whatever reason the length computation gets upset if we tell it
-	 * that we are using elements. It wants to discover it on its own, NO
-	 * CLUES! (Ms. Doyle)
-	 *
-	 * https://github.com/ElementsProject/libwally-core/issues/139
-	 */
-	wally_tx_get_length(tx->wtx, flags & ~WALLY_TX_FLAG_USE_ELEMENTS,
-			    &wsize);
+	wally_tx_get_length(tx->wtx, flags, &wsize);
 
 	tx->chainparams = chainparams;
 

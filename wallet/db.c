@@ -633,6 +633,12 @@ static struct migration dbmigrations[] = {
     {NULL, migrate_last_tx_to_psbt},
     {SQL("ALTER TABLE outputs ADD reserved_til INTEGER DEFAULT NULL;"), NULL},
     {NULL, fillin_missing_scriptpubkeys},
+    /* option_anchor_outputs is nailed at creation time. */
+    {SQL("ALTER TABLE channels ADD COLUMN option_anchor_outputs INTEGER"
+	 " DEFAULT 0;"), NULL },
+    /* We need to know if it was option_anchor_outputs to spend to_remote */
+    {SQL("ALTER TABLE outputs ADD option_anchor_outputs INTEGER"
+	 " DEFAULT 0;"), NULL},
 };
 
 /* Leak tracking. */
@@ -1284,8 +1290,8 @@ void migrate_last_tx_to_psbt(struct lightningd *ld, struct db *db,
 			abort();
 
 		last_sig.sighash_type = SIGHASH_ALL;
-		if (!psbt_input_set_partial_sig(last_tx->psbt, 0,
-						&remote_funding_pubkey, &last_sig))
+		if (!psbt_input_set_signature(last_tx->psbt, 0,
+					      &remote_funding_pubkey, &last_sig))
 			abort();
 		psbt_input_add_pubkey(last_tx->psbt, 0,
 		    &local_funding_pubkey);
@@ -1440,9 +1446,9 @@ void db_bind_timeabs(struct db_stmt *stmt, int col, struct timeabs t)
 	db_bind_u64(stmt, col, timestamp);
 }
 
-void db_bind_tx(struct db_stmt *stmt, int col, const struct bitcoin_tx *tx)
+void db_bind_tx(struct db_stmt *stmt, int col, const struct wally_tx *tx)
 {
-	u8 *ser = linearize_tx(stmt, tx);
+	u8 *ser = linearize_wtx(stmt, tx);
 	assert(ser);
 	db_bind_blob(stmt, col, ser, tal_count(ser));
 }

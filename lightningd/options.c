@@ -348,7 +348,7 @@ static char *opt_add_plugin(const char *arg, struct lightningd *ld)
 		log_info(ld->log, "%s: disabled via disable-plugin", arg);
 		return NULL;
 	}
-	plugin_register(ld->plugins, arg, NULL);
+	plugin_register(ld->plugins, arg, NULL, false);
 	return NULL;
 }
 
@@ -366,6 +366,16 @@ static char *opt_add_plugin_dir(const char *arg, struct lightningd *ld)
 static char *opt_clear_plugins(struct lightningd *ld)
 {
 	clear_plugins(ld->plugins);
+	return NULL;
+}
+
+static char *opt_important_plugin(const char *arg, struct lightningd *ld)
+{
+	if (plugin_blacklisted(ld->plugins, arg)) {
+		log_info(ld->log, "%s: disabled via disable-plugin", arg);
+		return NULL;
+	}
+	plugin_register(ld->plugins, arg, NULL, true);
 	return NULL;
 }
 
@@ -556,6 +566,10 @@ static void dev_register_opts(struct lightningd *ld)
 	opt_register_noarg("--dev-no-version-checks", opt_set_bool,
 			   &ld->dev_no_version_checks,
 			   "Skip calling subdaemons with --version on startup");
+	opt_register_early_noarg("--dev-builtin-plugins-unimportant",
+				 opt_set_bool,
+				 &ld->plugins->dev_builtin_plugins_unimportant,
+				 "Make builtin plugins unimportant so you can plugin stop them.");
 }
 #endif /* DEVELOPER */
 
@@ -770,6 +784,10 @@ static void register_opts(struct lightningd *ld)
 	opt_register_early_arg("--disable-plugin", opt_disable_plugin,
 			       NULL, ld,
 			       "Disable a particular plugin by filename/name");
+
+	opt_register_early_arg("--important-plugin", opt_important_plugin,
+			       NULL, ld,
+			       "Add an important plugin to be run (can be used multiple times). Die if the plugin dies.");
 
 	/* Early, as it suppresses DNS lookups from cmdline too. */
 	opt_register_early_arg("--always-use-proxy",
@@ -1278,6 +1296,9 @@ static void add_config(struct lightningd *ld,
 			json_add_opt_log_levels(response, ld->log);
 		} else if (opt->cb_arg == (void *)opt_disable_plugin) {
 			json_add_opt_disable_plugins(response, ld->plugins);
+		} else if (opt->cb_arg == (void *)opt_important_plugin) {
+			/* Do nothing, this is already handled by
+			 * opt_add_plugin.  */
 		} else if (opt->cb_arg == (void *)opt_add_plugin_dir
 			   || opt->cb_arg == (void *)plugin_opt_set
 			   || opt->cb_arg == (void *)plugin_opt_flag_set) {

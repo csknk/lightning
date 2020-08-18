@@ -17,6 +17,7 @@ struct ext_key;
 struct unilateral_close_info {
 	u64 channel_id;
 	struct node_id peer_id;
+	bool option_anchor_outputs;
 	/* NULL if this is an option_static_remotekey commitment */
 	struct pubkey *commitment_point;
 };
@@ -44,9 +45,6 @@ struct utxo {
 
 	/* The scriptPubkey if it is known */
 	u8 *scriptPubkey;
-
-	/* scriptSig. Only for P2SH outputs */
-	u8 *scriptSig;
 };
 
 void towire_utxo(u8 **pptr, const struct utxo *utxo);

@@ -568,10 +568,24 @@ send_outreq(struct plugin *plugin, const struct out_req *req)
 }
 
 static struct command_result *
-handle_getmanifest(struct command *getmanifest_cmd)
+handle_getmanifest(struct command *getmanifest_cmd,
+		   const char *buf,
+		   const jsmntok_t *getmanifest_params)
 {
 	struct json_stream *params = jsonrpc_stream_success(getmanifest_cmd);
 	struct plugin *p = getmanifest_cmd->plugin;
+	const jsmntok_t *dep;
+
+	/* This was added post 0.9.0 */
+	dep = json_get_member(buf, getmanifest_params, "allow-deprecated-apis");
+	if (!dep)
+		deprecated_apis = true;
+	else {
+		if (!json_to_bool(buf, dep, &deprecated_apis))
+			plugin_err(p, "Invalid allow-deprecated-apis '%.*s'",
+				   json_tok_full_len(dep),
+				   json_tok_full(buf, dep));
+	}
 
 	json_array_start(params, "options");
 	for (size_t i = 0; i < tal_count(p->opts); i++) {
@@ -579,6 +593,7 @@ handle_getmanifest(struct command *getmanifest_cmd)
 		json_add_string(params, "name", p->opts[i].name);
 		json_add_string(params, "type", p->opts[i].type);
 		json_add_string(params, "description", p->opts[i].description);
+		json_add_bool(params, "deprecated", p->opts[i].deprecated);
 		json_object_end(params);
 	}
 	json_array_end(params);
@@ -593,6 +608,7 @@ handle_getmanifest(struct command *getmanifest_cmd)
 		if (p->commands[i].long_description)
 			json_add_string(params, "long_description",
 					p->commands[i].long_description);
+		json_add_bool(params, "deprecated", p->commands[i].deprecated);
 		json_object_end(params);
 	}
 	json_array_end(params);
@@ -765,7 +781,6 @@ static struct command_result *handle_init(struct command *cmd,
 	struct sockaddr_un addr;
 	size_t i;
 	char *dir, *network;
-	struct json_out *param_obj;
 	struct plugin *p = cmd->plugin;
 	bool with_rpc = p->rpc_conn != NULL;
 
@@ -812,11 +827,6 @@ static struct command_result *handle_init(struct command *cmd,
 		membuf_init(&p->rpc_conn->mb, tal_arr(p, char, READ_CHUNKSIZE),
 			    READ_CHUNKSIZE, membuf_tal_realloc);
 
-		param_obj = json_out_obj(NULL, "config", "allow-deprecated-apis");
-		deprecated_apis =
-			streq(rpc_delve(tmpctx, p, "listconfigs", take(param_obj),
-					".allow-deprecated-apis"),
-			      "true");
 	}
 
 	opttok = json_get_member(buf, params, "options");
@@ -1022,7 +1032,7 @@ static void ld_command_handle(struct plugin *plugin,
 
 	if (!plugin->manifested) {
 		if (streq(cmd->methodname, "getmanifest")) {
-			handle_getmanifest(cmd);
+			handle_getmanifest(cmd, plugin->buffer, paramstok);
 			plugin->manifested = true;
 			return;
 		}
@@ -1252,6 +1262,7 @@ static struct plugin *new_plugin(const tal_t *ctx,
 		o.description = va_arg(ap, const char *);
 		o.handle = va_arg(ap, char *(*)(const char *str, void *arg));
 		o.arg = va_arg(ap, void *);
+		o.deprecated = va_arg(ap, int); /* bool gets promoted! */
 		tal_arr_expand(&p->opts, o);
 	}
 

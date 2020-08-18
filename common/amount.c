@@ -297,6 +297,18 @@ WARN_UNUSED_RESULT bool amount_msat_add_sat(struct amount_msat *val,
 	return amount_msat_add(val, a, msatb);
 }
 
+WARN_UNUSED_RESULT bool amount_msat_scale(struct amount_msat *val,
+					  struct amount_msat sat,
+					  double scale)
+{
+	double scaled = sat.millisatoshis * scale;
+
+	if (scaled > UINT64_MAX)
+		return false;
+	val->millisatoshis = scaled;
+	return true;
+}
+
 bool amount_sat_eq(struct amount_sat a, struct amount_sat b)
 {
 	return a.satoshis == b.satoshis;
@@ -401,17 +413,37 @@ bool amount_msat_to_u32(struct amount_msat msat, u32 *millisatoshis)
 	return true;
 }
 
-void amount_msat_from_u64(struct amount_msat *msat, u64 millisatoshis)
+struct amount_msat amount_msat(u64 millisatoshis)
 {
-	msat->millisatoshis = millisatoshis;
+	struct amount_msat msat;
+
+	msat.millisatoshis = millisatoshis;
+	return msat;
 }
 
-WARN_UNUSED_RESULT bool amount_msat_from_sat_u64(struct amount_msat *msat, u64 satoshis)
+struct amount_sat amount_sat(u64 satoshis)
 {
-	if (mul_overflows_u64(satoshis, MSAT_PER_SAT))
-		return false;
-	msat->millisatoshis = satoshis * MSAT_PER_SAT;
-	return true;
+	struct amount_sat sat;
+
+	sat.satoshis = satoshis;
+	return sat;
+}
+
+double amount_msat_ratio(struct amount_msat a, struct amount_msat b)
+{
+	return (double)a.millisatoshis / b.millisatoshis;
+}
+
+struct amount_msat amount_msat_div(struct amount_msat msat, u64 div)
+{
+	msat.millisatoshis /= div;
+	return msat;
+}
+
+struct amount_sat amount_sat_div(struct amount_sat sat, u64 div)
+{
+	sat.satoshis /= div;
+	return sat;
 }
 
 bool amount_msat_fee(struct amount_msat *fee,
@@ -484,7 +516,7 @@ struct amount_asset amount_sat_to_asset(struct amount_sat *sat, const u8 *asset)
 
 	assert(33 == sizeof(amt_asset.asset));
 	memcpy(amt_asset.asset, asset, sizeof(amt_asset.asset));
-	amt_asset.value = sat->satoshis; /* Raw: type conversion */
+	amt_asset.value = sat->satoshis;
 	return amt_asset;
 }
 

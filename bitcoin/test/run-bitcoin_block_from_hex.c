@@ -16,6 +16,9 @@ bool amount_asset_is_main(struct amount_asset *asset UNNEEDED)
 /* Generated stub for amount_asset_to_sat */
 struct amount_sat amount_asset_to_sat(struct amount_asset *asset UNNEEDED)
 { fprintf(stderr, "amount_asset_to_sat called!\n"); abort(); }
+/* Generated stub for amount_sat */
+struct amount_sat amount_sat(u64 satoshis UNNEEDED)
+{ fprintf(stderr, "amount_sat called!\n"); abort(); }
 /* Generated stub for amount_sat_add */
  bool amount_sat_add(struct amount_sat *val UNNEEDED,
 				       struct amount_sat a UNNEEDED,
@@ -60,6 +63,9 @@ u16 fromwire_u16(const u8 **cursor UNNEEDED, size_t *max UNNEEDED)
 /* Generated stub for fromwire_u32 */
 u32 fromwire_u32(const u8 **cursor UNNEEDED, size_t *max UNNEEDED)
 { fprintf(stderr, "fromwire_u32 called!\n"); abort(); }
+/* Generated stub for is_anchor_witness_script */
+bool is_anchor_witness_script(const u8 *script UNNEEDED, size_t script_len UNNEEDED)
+{ fprintf(stderr, "is_anchor_witness_script called!\n"); abort(); }
 /* Generated stub for is_p2sh */
 bool is_p2sh(const u8 *script UNNEEDED, struct ripemd160 *addr UNNEEDED)
 { fprintf(stderr, "is_p2sh called!\n"); abort(); }
@@ -75,6 +81,9 @@ void pubkey_to_der(u8 der[PUBKEY_CMPR_LEN] UNNEEDED, const struct pubkey *key UN
 /* Generated stub for pubkey_to_hash160 */
 void pubkey_to_hash160(const struct pubkey *pk UNNEEDED, struct ripemd160 *hash UNNEEDED)
 { fprintf(stderr, "pubkey_to_hash160 called!\n"); abort(); }
+/* Generated stub for script_push_bytes */
+void script_push_bytes(u8 **scriptp UNNEEDED, const void *mem UNNEEDED, size_t len UNNEEDED)
+{ fprintf(stderr, "script_push_bytes called!\n"); abort(); }
 /* Generated stub for scriptpubkey_p2wsh */
 u8 *scriptpubkey_p2wsh(const tal_t *ctx UNNEEDED, const u8 *witnessscript UNNEEDED)
 { fprintf(stderr, "scriptpubkey_p2wsh called!\n"); abort(); }

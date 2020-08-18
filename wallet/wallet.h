@@ -1111,7 +1111,7 @@ const struct wallet_payment **wallet_payment_list(const tal_t *ctx,
  * wallet_htlc_sigs_save - Store the latest HTLC sigs for the channel
  */
 void wallet_htlc_sigs_save(struct wallet *w, u64 channel_id,
-			   secp256k1_ecdsa_signature *htlc_sigs);
+			   const struct bitcoin_signature *htlc_sigs);
 
 /**
  * wallet_network_check - Check that the wallet is setup for this chain
@@ -1165,7 +1165,7 @@ void wallet_utxoset_add(struct wallet *w, const struct bitcoin_tx *tx,
 			const u32 txindex, const u8 *scriptpubkey,
 			struct amount_sat sat);
 
-void wallet_transaction_add(struct wallet *w, const struct bitcoin_tx *tx,
+void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
 			    const u32 blockheight, const u32 txindex);
 
 void wallet_annotate_txout(struct wallet *w, const struct bitcoin_txid *txid,
