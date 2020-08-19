@@ -88,7 +88,7 @@ EOF
 		PARENT_DIR=/tmp
 	else
 		while true; do
-			read -rp  "Please enter a path for the data directory for lightning development instances:" PARENT_DIR
+			read -rp  "Please enter a path for a parent directory that will hold lightning node data directories:" PARENT_DIR
 			PARENT_DIR="${PARENT_DIR//\~/$HOME}"
 			GRANDPARENT_DIR=$(dirname "${PARENT_DIR}")
 			[[ ! -d ${GRANDPARENT_DIR} ]] && { echo "Invalid path...try again."; continue; } 
@@ -99,15 +99,12 @@ EOF
 	# Make the data directories if they do not already exist.
 	for i in $(seq "$N_NODES"); do
 		mkdir -p "${PARENT_DIR}/l${i}-regtest"
-#		data_dir=${PARENT_DIR}/l${i}-regtest
-#		[[ ! -d ${data_dir} ]] && mkdir -p "${data_dir}"
 	done
 }
 
 write_config() {
 	for i in $(seq "$N_NODES"); do
 		port=$((9000 + i))
-		# Node one config
 		cat <<- EOF > "${PARENT_DIR}/l${i}-regtest/config"
 		network=regtest
 		log-level=debug
@@ -135,7 +132,8 @@ start_ln() {
 	[[ -f "$PATH_TO_BITCOIN/regtest/bitcoind.pid" ]] || bitcoind -daemon -regtest -txindex
 
 	# Wait for it to start.
-	while ! bt-cli ping 2> /dev/null; do
+#	while ! bt-cli ping 2> /dev/null; do
+	while ! bt-cli ping 2>&1 /dev/null; do
 		echo "Waiting for bitcoind to start..."
 		sleep 1
 	done
